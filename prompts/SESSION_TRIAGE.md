@@ -30,11 +30,11 @@ Quote 1-3 sentences of evidence for every finding. Don't synthesize, don't infer
 
 | Category | Signal in transcript |
 |---|---|
-| `missed_skill` | User invoked a skill manually after Claude did ad-hoc work; Claude did multi-step setup that a known skill (e.g. python-env-management, commit-and-verify) would have automated; Claude said "let me check the help" for a tool that has a skill wrapper. **Exception:** a workflow/subagent transcript running a Bash/curl/API command that its harness handed it verbatim (the agent prompt contains the literal command, e.g. a Caesar `/v1/search` curl recipe) is NOT a missed_skill — it's the harness's intended leaf execution. Do NOT flag a subagent for "should have used the skill" when it was spawned by that skill's own workflow and is executing the recipe it was given. |
+| `missed_skill` | User invoked a skill manually after Claude did ad-hoc work; Claude did multi-step setup that a known skill (e.g. python-env-management, commit-and-verify) would have automated; Claude said "let me check the help" for a tool that has a skill wrapper. **Two gates before you flag — fail either and emit nothing:** (a) name the specific installed skill whose own `Use when`/trigger plausibly matches THIS task; "a skill could exist for this" is not enough, and a skill whose `Use when` is human-in-the-loop iteration (e.g. `vlm-prompt-iteration`) does not match a one-shot classifier/leaf call. (b) The user did not ask for one-shot / single-output (e.g. "return a SINGLE JSON object and nothing else") — a task explicitly scoped to one output is not a missed skill. **Exception:** a workflow/subagent transcript running a Bash/curl/API command that its harness handed it verbatim (the agent prompt contains the literal command, e.g. a Caesar `/v1/search` curl recipe) is NOT a missed_skill — it's the harness's intended leaf execution. Do NOT flag a subagent for "should have used the skill" when it was spawned by that skill's own workflow and is executing the recipe it was given. **Also not a miss:** a subagent lane whose brief already inlines the behavior (writes tests / commits / self-reviews per its `task-N-brief.md`) but shows empty `skills_invoked` — the discipline is present in the brief; the absent skill *invocation* is not the finding. |
 | `wrong_skill` | Claude invoked a skill that didn't fit; user corrected ("no use X instead"). |
 | `sandbox_friction` | `Operation not permitted`, `dangerouslyDisableSandbox: true` retries, `/tmp` writes failing, permission prompts denied. |
 | `memory_miss` | User says "I told you", "we established", "remember", "the same as last time"; Claude re-discovers a workaround that was used in a previous session. |
-| `tool_loop` | Same command retried ≥3 times with minor variants (>2 close-but-different curl/grep/find variants in <10 turns). **Marker check:** the retry-budget rules require the agent to emit a literal `RETRY-BUDGET: ...` (or `FETCH-PIVOT: ...`) line in its response text when it stops/pivots. A loop that ends WITH such a marker means the rule worked — severity `low`, and say the marker was present. A loop with NO marker is the real finding — note "no RETRY-BUDGET marker" in `what`. |
+| `tool_loop` | Same command retried ≥3 times with minor variants (>2 close-but-different curl/grep/find variants in <10 turns). |
 | `permission_prompt` | Commands the user repeatedly allowed or repeatedly denied that should be in `.claude/settings.json` allowlist/denylist. |
 | `fabricated_id` | Claude quoted a SHA, PR number, line number, function name, or version that wasn't from a just-run command. See the HARD RULE above: tools like `StructuredOutput` that succeed but aren't in `skill_listing` are harness-provided — never flag them. |
 | `stop_projection` | "you must be tired", "let's pick this back up", "we should stop", any variant. |
@@ -47,7 +47,6 @@ An empty findings array is a valid result for ANY session where nothing meets th
 ## Output schema
 
 Write EXACTLY this shape to `OUTPUT_PATH`. JSON only, no markdown fence, no prose.
-`compliance_markers` holds literal-string counts of `RETRY-BUDGET:` and `FETCH-PIVOT:` occurrences in assistant text (0 when absent — most sessions).
 
 ```json
 {
@@ -60,7 +59,6 @@ Write EXACTLY this shape to `OUTPUT_PATH`. JSON only, no markdown fence, no pros
   "skills_invoked": ["schedule", "python-env-management"],
   "models_used": ["claude-opus-4-7"],
   "notable_initiatives": ["one-line summary of the main thing the user worked on"],
-  "compliance_markers": {"RETRY-BUDGET": 0, "FETCH-PIVOT": 0},
   "findings": [
     {
       "category": "missed_skill",

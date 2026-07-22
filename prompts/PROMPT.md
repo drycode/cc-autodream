@@ -120,7 +120,7 @@ For findings with `confidence: high` AND `count >= 2` AND `severity: high`, you 
 ## How to start
 
 1. Read the findings directory's `*.json` files (use Glob then Read).
-2. Build an in-memory aggregate: group findings by category, count, sort by (count × severity). Also sum each session's `compliance_markers` counts (`RETRY-BUDGET`, `FETCH-PIVOT`) when present: markers measure the retry-budget rules working as designed. When reporting a `tool_loop` pattern, split marker-present sessions (rule fired — healthy) from marker-absent ones (the actual non-compliance) and state both counts.
+2. Build an in-memory aggregate: group findings by category, count, sort by (count × severity).
 3. Walk installed skills (Glob `~/.claude/skills/*/SKILL.md` etc., Read frontmatter).
 4. Read `<findings-dir>/changelog-window.md` (Upstream changes) and `<findings-dir>/run-stats.txt` (Autodream self-audit) if present.
 5. Write the report to the literal report path from line 2.

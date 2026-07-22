@@ -83,6 +83,17 @@ run.sh handles it with:
 
 run.sh writes `run-stats.txt` (raw/excluded/triaged counts, L1 rounds/done/missing/err, elapsed). PROMPT.md's "Autodream self-audit" section reads it and is told to flag self-pollution regressions (excluded count climbing), pipeline-capacity problems (oversized transcripts that blow the token budget), retry/sleep health, and to propose concrete cc-autodream source fixes since the user authors the tool. It proposes; it does not edit cc-autodream source.
 
+## Dream triage (`triage-dream.sh`)
+
+A third, optional pass that turns a finished report into a review-ready worklist. The report *summarizes* the day; triage extracts its actionable items, **grounds each against reality with read-only shell checks** (the aggregator reads transcripts, so its filesystem claims are often stale — e.g. "skill X is absent" when it is invocable, or a proposed allowlist key whose exact name was never verified), and writes `dreams/YYYY-MM-DD.triage.md`: a ranked table (title / type / priority / grounding / ready?) plus per-item detail and *draft* ticket text.
+
+Same blast-radius stance as the aggregator: it **proposes but never acts** — it creates no Linear tickets and edits nothing but its own triage output. Acting stays human-gated.
+
+- `prompts/TRIAGE_DREAM.md` is the prompt; `bin/triage-dream.sh` is the runner (same lean-query flags as L1/L2, but adds `Bash Grep Glob` so it can ground claims read-only — the prompt forbids any mutating command).
+- run.sh calls it as a **guarded, non-fatal step after a successful report** (inside the `if [ -f "$REPORT_PATH" ]` block). Set `AUTODREAM_TRIAGE=0` to skip it. It is idempotent (won't re-triage a date with an existing non-empty `.triage.md` unless `AUTODREAM_FORCE=1`), so the morning catch-up triggers never dup-triage.
+- Standalone: `~/.claude/autodream/triage-dream.sh` (latest report) or `... 2026-07-14` (a specific date). Model override: `AUTODREAM_TRIAGE_MODEL` (default `claude-opus-4-8`).
+- It reuses the same `$WORK_DIR` cwd-isolation + `clean_work_bucket` wipe as run.sh, so its `claude --print` call never leaves an AI-title stub in the real session bucket.
+
 ## Running / rerunning a date
 
 ```

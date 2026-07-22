@@ -599,6 +599,22 @@ PY
         log "claude-memory installed but no project memory was touched; skipping per-project GC"
       fi
     fi
+
+    # ---- Dream triage: turn the fresh report into a review-ready worklist
+    #      ($DREAMS_DIR/$TARGET_DATE.triage.md). Proposes tickets; never creates
+    #      them and never edits source — same human-gated stance as the aggregator.
+    #      Idempotent + non-fatal, so the morning catch-up triggers are safe.
+    if [ "${AUTODREAM_TRIAGE:-1}" != "0" ]; then
+      TRIAGE="$SCRIPT_DIR/triage-dream.sh"
+      [ -x "$TRIAGE" ] || TRIAGE="$AUTODREAM_DIR/triage-dream.sh"
+      if [ -x "$TRIAGE" ]; then
+        log "dream triage: $TARGET_DATE..."
+        "$TRIAGE" "$TARGET_DATE" >> "$RUN_LOG" 2>&1 \
+          || log "triage step returned non-zero (continuing)"
+      else
+        log "triage-dream.sh not found; skipping dream triage"
+      fi
+    fi
   else
     log "WARNING: no report at $REPORT_PATH"
   fi
