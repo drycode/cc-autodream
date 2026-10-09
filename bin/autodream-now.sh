@@ -75,12 +75,13 @@ DOMAIN="gui/$UID_NUM"
 # in the same namespace. Pick the plist that actually runs run.sh — not siblings
 # like *-review (review.sh). Otherwise synthesize one.
 BASE_LABEL=""
+SCHEDULED_PLIST=""
 for plist in "$HOME"/Library/LaunchAgents/*autodream*.plist; do
   [ -e "$plist" ] || continue
   case "$plist" in *.ondemand.plist) continue ;; esac
   /usr/bin/grep -q 'run\.sh' "$plist" 2>/dev/null || continue
   if l="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$plist" 2>/dev/null)"; then
-    BASE_LABEL="$l"; break
+    BASE_LABEL="$l"; SCHEDULED_PLIST="$plist"; break
   fi
 done
 [ -n "$BASE_LABEL" ] || BASE_LABEL="com.$(id -un | tr -dc 'a-zA-Z0-9').autodream"
@@ -109,6 +110,21 @@ env_xml+="        <key>DREAMS_DIR</key><string>${DREAMS_DIR}</string>
 "
 [ "$FORCE" = 1 ] && env_xml+="        <key>AUTODREAM_FORCE</key><string>1</string>
 "
+# Claude account: the scheduled job's CLAUDE_CONFIG_DIR/ANTHROPIC_CONFIG_DIR, so an
+# on-demand run bills the same account as the nightly one even when launched from a
+# shell scoped to another account; the caller's values only fill in when the
+# scheduled job sets none. Without this the run used the default config dir.
+for var in CLAUDE_CONFIG_DIR ANTHROPIC_CONFIG_DIR; do
+  val=""
+  if [ -n "$SCHEDULED_PLIST" ]; then
+    val="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$var" "$SCHEDULED_PLIST" 2>/dev/null || true)"
+  fi
+  val="${val:-${!var:-}}"
+  if [ -n "$val" ]; then
+    env_xml+="        <key>$var</key><string>${val}</string>
+"
+  fi
+done
 
 ONDEMAND_OUT="$AUTODREAM_DIR/logs/ondemand.out.log"
 ONDEMAND_ERR="$AUTODREAM_DIR/logs/ondemand.err.log"
