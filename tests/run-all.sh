@@ -161,6 +161,17 @@ test_idempotent(){
   rm -rf "$root"
 }
 
+test_backfill(){
+  echo "# backfill rebuilds an existing report without memory-edit access"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  printf 'OLD REPORT\n' > "$root/dreams/$DATE.md"
+  export AUTODREAM_BACKFILL=1 MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset AUTODREAM_BACKFILL MOCK_CAPTURE_DIR
+  assert_nogrep "$root/dreams/$DATE.md" 'OLD REPORT' "existing report rebuilt"
+  assert_nogrep "$root/cap/l2-args.txt" '^Edit$' "L2 gets no Edit tool"
+  assert_grep "$root/cap/l2-args.txt" 'BACKFILL of a past date' "L2 told not to write memory"
+  rm -rf "$root"
+}
+
 test_revalidates_garbage(){
   echo "# a non-empty but malformed findings JSON is re-dispatched, not counted as done"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -445,6 +456,7 @@ test_happy
 test_unreadable
 test_incomplete
 test_idempotent
+test_backfill
 test_revalidates_garbage
 test_no_sessions
 test_framing

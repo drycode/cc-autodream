@@ -26,6 +26,8 @@
 #   AUTODREAM_RETRY_WAIT seconds to pause between retry rounds       default: 60
 #   AUTODREAM_NETCHECK   set 0 to skip waiting-for-network on retry  default: 1
 #   AUTODREAM_FORCE      set 1 to rebuild even if a report exists    default: 0
+#   AUTODREAM_BACKFILL   set 1 to rebuild a PAST date read-only: forces a rebuild, never
+#                        edits MEMORY.md, and skips notify, GC and triage    default: 0
 #   AUTODREAM_SLIM_BYTES sessions larger than this are slimmed for L1  default: 262144
 #   AUTODREAM_L1_MODEL   override the L1 per-session worker model    default: claude-haiku-5-5
 #   AUTODREAM_L2_MODEL   override the L2 aggregator model            default: claude-opus-5-5
@@ -43,6 +45,11 @@ LOG_DIR="$AUTODREAM_DIR/logs"
 FANOUT="${FANOUT:-8}"
 AUTODREAM_L1_MODEL="${AUTODREAM_L1_MODEL:-claude-haiku-5-5}"
 AUTODREAM_L2_MODEL="${AUTODREAM_L2_MODEL:-claude-opus-5-5}"
+BACKFILL="${AUTODREAM_BACKFILL:-0}"
+# Backfill rebuilds an old date's report only; nothing downstream should fire.
+if [ "$BACKFILL" = "1" ]; then
+  AUTODREAM_GC=0 AUTODREAM_TRIAGE=0
+fi
 AUTODREAM_HARNESSES="${AUTODREAM_HARNESSES:-claude,omp,codex}"
 OMP_SESSIONS_DIR="${OMP_SESSIONS_DIR:-$HOME/.omp/agent/sessions}"
 OMP_PROFILES_DIR="${OMP_PROFILES_DIR:-$HOME/.omp/profiles}"
@@ -368,7 +375,7 @@ run() {
   # complete. This makes launchd catch-up/relaunch (the sleep-resilience strategy:
   # multiple wake-time triggers) cheap no-ops once the night succeeded. A run that
   # failed overnight left NO report, so it correctly proceeds and finishes the work.
-  if [ "${AUTODREAM_LIST_ONLY:-0}" != "1" ] && [ -s "$REPORT_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
+  if [ "${AUTODREAM_LIST_ONLY:-0}" != "1" ] && [ -s "$REPORT_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ] && [ "$BACKFILL" != "1" ]; then
     log "report already exists for $TARGET_DATE ($REPORT_PATH); nothing to do (AUTODREAM_FORCE=1 to rebuild)"
     return 0
   fi
@@ -598,6 +605,14 @@ PY
   # that `modelUsage` names the requested id.
   log "L2 model: $AUTODREAM_L2_MODEL"
 
+  # Backfill drops Edit and forbids memory writes: a past date's patterns are
+  # stale evidence, and today's runs already pin what is still recurring.
+  L2_TOOLS="Glob Read Write Edit"
+  L2_MEMORY_RULE="May edit project MEMORY.md files per the prompt rules."
+  if [ "$BACKFILL" = "1" ]; then
+    L2_TOOLS="Glob Read Write"
+    L2_MEMORY_RULE="BACKFILL of a past date: write ONLY the report. Never write or edit any MEMORY.md, memory file, or touched-projects.txt; under Memory updates, write 'None (backfill run)'."
+  fi
   L2_ATTEMPTS="${AUTODREAM_L2_ATTEMPTS:-3}"
   L2_START=$(date +%s)
   L2_RC=1
@@ -621,11 +636,11 @@ PY
         --permission-mode bypassPermissions \
         --model "$AUTODREAM_L2_MODEL" \
         --no-session-persistence \
-        --tools Glob Read Write Edit \
+        --tools $L2_TOOLS \
         --disable-slash-commands \
         --strict-mcp-config \
         --settings '{"disableAllHooks":true}' \
-        --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then write the report, via the Write tool, to the literal report path given on line 2. Those paths are literal strings, not shell variables — never \$-expand them. May edit project MEMORY.md files per the prompt rules. Print report path and 3-line summary, then exit."
+        --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then write the report, via the Write tool, to the literal report path given on line 2. Those paths are literal strings, not shell variables — never \$-expand them. $L2_MEMORY_RULE Print report path and 3-line summary, then exit."
     )
 
     L2_RC=$?
@@ -648,7 +663,7 @@ PY
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
 
     # ---- Drop open-questions file into Sublime (no-op if zero questions) ----
-    if [ -x "$AUTODREAM_DIR/notify.sh" ]; then
+    if [ "$BACKFILL" != "1" ] && [ -x "$AUTODREAM_DIR/notify.sh" ]; then
       log "writing open-questions inbox file..."
       "$AUTODREAM_DIR/notify.sh" "$REPORT_PATH" || log "notify step returned non-zero (continuing)"
     fi
