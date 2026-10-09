@@ -16,7 +16,7 @@
 #   CLAUDE_BIN        path to claude CLI          default: $HOME/.local/bin/claude
 #   AUTODREAM_DIR     scripts + prompts + state   default: $HOME/.claude/autodream
 #   DREAMS_DIR        where reports live          default: $HOME/.claude/dreams
-#   AUTODREAM_TRIAGE_MODEL  triage model          default: claude-opus-4-8
+#   AUTODREAM_TRIAGE_MODEL  triage model          default: claude-opus-5-5
 #   AUTODREAM_FORCE   set 1 to rebuild an existing triage file   default: 0
 
 set -u
@@ -25,7 +25,7 @@ CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
 DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
-TRIAGE_MODEL="${AUTODREAM_TRIAGE_MODEL:-claude-opus-4-8}"
+TRIAGE_MODEL="${AUTODREAM_TRIAGE_MODEL:-claude-opus-5-5}"
 
 log() { echo "[$(date '+%H:%M:%S')] triage: $*"; }
 

@@ -14,6 +14,7 @@ All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 - **Docs.** `CLAUDE.md` (decisions, state layout, gotchas) and `codemaps/architecture.md` (data flow + file map), so the analysis behind this work is not re-derived next session.
 
 ### Changed
+- **Model pins (2026-10-09).** L1 workers move from `claude-haiku-4-5` to `claude-haiku-5-5` (new `AUTODREAM_L1_MODEL` override); the L2 aggregator from `claude-opus-4-7` to `claude-opus-5-5`, replacing the expired Fable-until-2026-06-20 date switch; dream triage from `claude-opus-4-8` to `claude-opus-5-5`. Each id was confirmed via `modelUsage` before pinning, since the CLI silently falls back to opus on unknown ids.
 - **Lean-query invocation.** Both layers compose minimal-footprint flags from claude-cells `internal/claude/query.go` (`--tools <only-needed> --disable-slash-commands --strict-mcp-config --settings '{"disableAllHooks":true}'` + env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, etc.), cutting per-call tokens by dropping hooks/skills/MCP/CLAUDE.md while keeping subscription OAuth auth.
 
 ### Notes

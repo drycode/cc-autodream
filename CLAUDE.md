@@ -91,7 +91,7 @@ Same blast-radius stance as the aggregator: it **proposes but never acts** — i
 
 - `prompts/TRIAGE_DREAM.md` is the prompt; `bin/triage-dream.sh` is the runner (same lean-query flags as L1/L2, but adds `Bash Grep Glob` so it can ground claims read-only — the prompt forbids any mutating command).
 - run.sh calls it as a **guarded, non-fatal step after a successful report** (inside the `if [ -f "$REPORT_PATH" ]` block). Set `AUTODREAM_TRIAGE=0` to skip it. It is idempotent (won't re-triage a date with an existing non-empty `.triage.md` unless `AUTODREAM_FORCE=1`), so the morning catch-up triggers never dup-triage.
-- Standalone: `~/.claude/autodream/triage-dream.sh` (latest report) or `... 2026-07-14` (a specific date). Model override: `AUTODREAM_TRIAGE_MODEL` (default `claude-opus-4-8`).
+- Standalone: `~/.claude/autodream/triage-dream.sh` (latest report) or `... 2026-07-14` (a specific date). Model override: `AUTODREAM_TRIAGE_MODEL` (default `claude-opus-5-5`).
 - It reuses the same `$WORK_DIR` cwd-isolation + `clean_work_bucket` wipe as run.sh, so its `claude --print` call never leaves an AI-title stub in the real session bucket.
 
 ## Running / rerunning a date
