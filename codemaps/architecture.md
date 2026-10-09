@@ -12,14 +12,16 @@ bin/run.sh  TARGET_DATE
       │
       ├─ idempotency guard: report exists for date? → exit 0 (unless AUTODREAM_FORCE=1)
       │
-      ├─ enumerate: find *.jsonl in [TARGET_DATE, NEXT_DATE)  → sessions.txt.raw
-      │     └─ prune-self-sessions.sh --filter                → sessions.txt   (drops autodream's own)
-      │
+      ├─ Claude *.jsonl → prune-self-sessions.sh --filter → sessions.txt
+      ├─ OMP root JSONLs + Codex rollout JSONLs (mtime window)
+      │     └─ exclude Codex subagents/Claude Code-vscode companions; normalize-transcript.py → work/normalized/<date>/
+      │          source-map.jsonl tracks original path/cwd/harness; skip no-user sessions
       ├─ L1 retry loop (AUTODREAM_L1_ROUNDS):
       │     dispatch_l1: xargs -P FANOUT → claude --print (haiku, lean flags) per session
       │       reads session .jsonl, writes findings/<date>/<sha>.json   (idempotent; .err on fail)
       │     l1_missing_count → wait_for_network → retry the still-missing
       │
+      ├─ rewrite findings session_path/harness/project from source map (not model guesses)
       ├─ run-stats.txt          (self-audit telemetry)
       ├─ changelog_window()      → findings/<date>/changelog-window.md  (git log -p on claude-code CHANGELOG)
       │
@@ -38,6 +40,7 @@ bin/run.sh  TARGET_DATE
 |---|---|
 | `bin/run.sh` | orchestrator: guard, enumerate+filter, L1 retry loop, changelog, L2 retry loop, notify, gc |
 | `bin/autodream-now.sh` | run NOW via a transient one-shot launchd agent (escapes the ~10-min cap on bg tasks/ssh). `[DATE] [--force] [--watch] [--dry-run]`. RunAtLoad only (no kickstart → no double run); picks the scheduled plist that runs `run.sh` for its label namespace |
+| `bin/normalize-transcript.py` | streaming OMP/Codex → Claude-shaped JSONL with source metadata and bounded tool output |
 | `bin/prune-self-sessions.sh` | self-session predicate (single source of truth): list / `--delete` / `--filter` |
 | `bin/notify.sh` | extract "Open questions" → inbox file in Sublime |
 | `bin/review.sh` | interactive morning triage (`claude --append-system-prompt <report>`); `AUTODREAM_TRIAGE_SURFACE=cmux` (config/env) launches it in its own cmux workspace instead of inline |
@@ -63,6 +66,8 @@ All optional; full list (with defaults) is documented in `bin/run.sh`'s header. 
 |---|---|---|
 | `CLAUDE_BIN` | `$HOME/.local/bin/claude` | path to `claude` CLI |
 | `PROJECTS_DIR` | `$HOME/.claude/projects` | where Claude Code stores session JSONLs |
+| `AUTODREAM_HARNESSES` | `claude,omp,codex` | select source harnesses |
+| `AUTODREAM_LIST_ONLY` | `0` | `1` prints per-harness scan counts and stops before L1 |
 | `AUTODREAM_DIR` | `$HOME/.claude/autodream` | scripts + runtime state |
 | `DREAMS_DIR` | `$HOME/.claude/dreams` | where reports are written |
 | `FANOUT` | `8` | L1 parallelism |

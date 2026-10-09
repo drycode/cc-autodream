@@ -29,6 +29,9 @@
 #   AUTODREAM_SLIM_BYTES sessions larger than this are slimmed for L1  default: 262144
 #   AUTODREAM_L1_MODEL   override the L1 per-session worker model    default: claude-haiku-5-5
 #   AUTODREAM_L2_MODEL   override the L2 aggregator model            default: claude-opus-5-5
+#   AUTODREAM_HARNESSES  comma-separated selected inputs             default: claude,omp,codex
+#   AUTODREAM_LIST_ONLY  set 1 to scan/count without running L1      default: 0
+#   OMP_SESSIONS_DIR / OMP_PROFILES_DIR / CODEX_SESSIONS_DIR  transcript roots
 
 set -u
 
@@ -40,6 +43,14 @@ LOG_DIR="$AUTODREAM_DIR/logs"
 FANOUT="${FANOUT:-8}"
 AUTODREAM_L1_MODEL="${AUTODREAM_L1_MODEL:-claude-haiku-5-5}"
 AUTODREAM_L2_MODEL="${AUTODREAM_L2_MODEL:-claude-opus-5-5}"
+AUTODREAM_HARNESSES="${AUTODREAM_HARNESSES:-claude,omp,codex}"
+OMP_SESSIONS_DIR="${OMP_SESSIONS_DIR:-$HOME/.omp/agent/sessions}"
+OMP_PROFILES_DIR="${OMP_PROFILES_DIR:-$HOME/.omp/profiles}"
+CODEX_SESSIONS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
+NORMALIZER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/normalize-transcript.py"
+if [ ! -f "$NORMALIZER" ] && [ -L "${BASH_SOURCE[0]}" ]; then
+  NORMALIZER="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/normalize-transcript.py"
+fi
 
 # Isolated cwd for every `claude --print` worker (see "AI-title stubs" below). The
 # workers all read/write by ABSOLUTE path, so their cwd is functionally irrelevant —
@@ -57,6 +68,8 @@ FINDINGS_DIR="$AUTODREAM_DIR/findings/$TARGET_DATE"
 REPORT_PATH="$DREAMS_DIR/$TARGET_DATE.md"
 RUN_LOG="$LOG_DIR/run-$TARGET_DATE.log"
 SESSIONS_LIST="$FINDINGS_DIR/sessions.txt"
+SOURCE_MAP="$FINDINGS_DIR/source-map.jsonl"
+NORMALIZED_DIR="$WORK_DIR/normalized/$TARGET_DATE"
 
 # Self-session prune helper — single source of truth for "is this autodream's own
 # transcript?". Resolve it next to this script first (works for the repo copy and the
@@ -272,12 +285,11 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       > /dev/null 2> "$errlog"
 
     if [ -s "$output" ]; then
-      # Reported path should be the real session, not the temp slim copy. Then drop
-      # the slim file (regenerable; keeps the findings dir clean).
-      if [ -n "$slimfile" ]; then
-        sed -i "" "s#$slimfile#$session#g" "$output" 2>/dev/null || true
-        rm -f "$slimfile"
-      fi
+      # Rewrite model-reported paths deterministically. The source-map pass
+      # later resolves normalized OMP/Codex paths to their original sources.
+      jq --arg original "$session" ".session_path=\$original" "$output" > "$output.tmp" \
+        && mv "$output.tmp" "$output" || rm -f "$output.tmp"
+      [ -n "$slimfile" ] && rm -f "$slimfile"
       rm -f "$errlog"
       echo "ok: $session ($hash)"
     else
@@ -305,6 +317,42 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
   ' _ {}
 }
 
+in_window() {
+  find "$1" -newermt "$TARGET_DATE 00:00:00" ! -newermt "$NEXT_DATE 00:00:00" -print 2>/dev/null | grep -q .
+}
+
+enabled_harness() {
+  case ",$AUTODREAM_HARNESSES," in *,"$1",*) return 0 ;; *) return 1 ;; esac
+}
+
+append_normalized() {
+  local harness="$1" source="$2" hash normalized rc meta
+  hash=$(printf '%s' "$source" | shasum -a 1 | cut -c1-12)
+  normalized="$NORMALIZED_DIR/$hash.jsonl"
+  "$NORMALIZER" "$source" "$normalized" --harness "$harness" 2>/dev/null
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$normalized" >> "$SESSIONS_LIST"
+    meta=$(sed -n '1p' "$normalized")
+    jq -cn --arg path "$source" --arg normalized "$normalized" --arg harness "$harness" --argjson meta "$meta" \
+      '{source:$path,normalized:$normalized,harness:$harness,cwd:$meta.cwd}' >> "$SOURCE_MAP"
+  else
+    case "$harness" in
+      omp) OMP_EXCLUDED=$((OMP_EXCLUDED + 1)) ;;
+      codex) CODEX_EXCLUDED=$((CODEX_EXCLUDED + 1)) ;;
+    esac
+    [ "$rc" -eq 3 ] || log "normalization failed ($harness): $source"
+  fi
+}
+
+write_harness_stats() {
+  {
+    printf 'claude_found: %s\nclaude_triaged: %s\nclaude_excluded: %s\n' "$CLAUDE_FOUND" "$CLAUDE_TRIAGED" "$CLAUDE_EXCLUDED"
+    printf 'omp_found: %s\nomp_triaged: %s\nomp_excluded: %s\n' "$OMP_FOUND" "$OMP_TRIAGED" "$OMP_EXCLUDED"
+    printf 'codex_found: %s\ncodex_triaged: %s\ncodex_excluded: %s\n' "$CODEX_FOUND" "$CODEX_TRIAGED" "$CODEX_EXCLUDED"
+  }
+}
+
 run() {
   log "===== autodream start: $(date) ====="
   log "target date: $TARGET_DATE"
@@ -313,41 +361,65 @@ run() {
   log "fanout:      $FANOUT"
   log "claude:      $CLAUDE_BIN"
 
-  [ -x "$CLAUDE_BIN" ] || { log "FATAL: claude not at $CLAUDE_BIN"; exit 1; }
+  [ "${AUTODREAM_LIST_ONLY:-0}" = "1" ] || [ -x "$CLAUDE_BIN" ] || { log "FATAL: claude not at $CLAUDE_BIN"; exit 1; }
 
   # ---- Idempotency guard: a finished report means we're done ----
   # A report is only written after a successful L2, so its presence means the date is
   # complete. This makes launchd catch-up/relaunch (the sleep-resilience strategy:
   # multiple wake-time triggers) cheap no-ops once the night succeeded. A run that
   # failed overnight left NO report, so it correctly proceeds and finishes the work.
-  if [ -s "$REPORT_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
+  if [ "${AUTODREAM_LIST_ONLY:-0}" != "1" ] && [ -s "$REPORT_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
     log "report already exists for $TARGET_DATE ($REPORT_PATH); nothing to do (AUTODREAM_FORCE=1 to rebuild)"
     return 0
   fi
 
-  # ---- Enumerate sessions modified during the target day ----
-  log "scanning $PROJECTS_DIR for sessions modified between $TARGET_DATE and $NEXT_DATE..."
-  find "$PROJECTS_DIR" -type f -name '*.jsonl' \
-       -newermt "$TARGET_DATE 00:00:00" \
-       ! -newermt "$NEXT_DATE 00:00:00" \
-       2>/dev/null > "$SESSIONS_LIST.raw"
-  RAW=$(wc -l < "$SESSIONS_LIST.raw" | tr -d ' ')
-
-  # Exclude autodream's OWN headless worker/aggregator transcripts. New runs leave none
-  # (--no-session-persistence), but runs predating that fix littered ~/.claude/projects/
-  # and those files must not be re-triaged. The prune helper owns the predicate; if it's
-  # missing, fall back to the raw list rather than silently dropping real sessions.
+  # Claude self-prune and empty-session filter retain their original behavior.
+  # OMP globbing is EXACTLY one project directory below each sessions root;
+  # sidecar children (<stem>/<agent>.jsonl) never enter this list.
+  mkdir -p "$NORMALIZED_DIR"
+  : > "$SOURCE_MAP"
+  : > "$SESSIONS_LIST.raw"
+  if enabled_harness claude; then
+    find "$PROJECTS_DIR" -type f -name '*.jsonl' \
+      -newermt "$TARGET_DATE 00:00:00" ! -newermt "$NEXT_DATE 00:00:00" \
+      2>/dev/null > "$SESSIONS_LIST.raw"
+  fi
+  CLAUDE_FOUND=$(wc -l < "$SESSIONS_LIST.raw" | tr -d ' ')
   if [ -x "$PRUNE" ]; then
     "$PRUNE" --filter < "$SESSIONS_LIST.raw" > "$SESSIONS_LIST" 2>/dev/null || cp "$SESSIONS_LIST.raw" "$SESSIONS_LIST"
   else
     cp "$SESSIONS_LIST.raw" "$SESSIONS_LIST"
   fi
+  CLAUDE_EXCLUDED=$(( CLAUDE_FOUND - $(wc -l < "$SESSIONS_LIST" | tr -d ' ') ))
+  EXCLUDED="$CLAUDE_EXCLUDED"
+  OMP_FOUND=0 OMP_EXCLUDED=0 CODEX_FOUND=0 CODEX_EXCLUDED=0
+  if enabled_harness omp; then
+    for sp in "$OMP_SESSIONS_DIR"/*/*.jsonl "$OMP_PROFILES_DIR"/*/agent/sessions/*/*.jsonl; do
+      [ -f "$sp" ] && in_window "$sp" || continue
+      OMP_FOUND=$((OMP_FOUND + 1))
+      append_normalized omp "$sp"
+    done
+  fi
+  if enabled_harness codex; then
+    for sp in "$CODEX_SESSIONS_DIR"/????/??/??/rollout-*.jsonl; do
+      [ -f "$sp" ] && in_window "$sp" || continue
+      CODEX_FOUND=$((CODEX_FOUND + 1))
+      # Recent headless companions have originator=Claude Code, source=vscode;
+      # source.subagent identifies nested children (thread_spawn/guardian).
+      # Preserve human codex-tui cli and ambiguous codex_exec exec roots.
+      if jq -e 'select(.type=="session_meta") | .payload |
+          ((.source | type=="object" and has("subagent")) or
+           (.originator=="Claude Code" and .source=="vscode"))' "$sp" 2>/dev/null | grep -q true; then
+        CODEX_EXCLUDED=$((CODEX_EXCLUDED + 1))
+        continue
+      fi
+      append_normalized codex "$sp"
+    done
+  fi
+  RAW=$((CLAUDE_FOUND + OMP_FOUND + CODEX_FOUND))
   COUNT_AFTER_PRUNE=$(wc -l < "$SESSIONS_LIST" | tr -d ' ')
-  EXCLUDED=$(( RAW - COUNT_AFTER_PRUNE ))
-
-  # Drop 0-turn shells (auto-opened/aborted sessions with no user input) before fanout.
-  # Independent of the self-prune above, so the two telemetry counts don't overlap.
-  SKIPPED_EMPTY=0
+  # Claude shells only: normalized sources with no user turns were already
+  # excluded by the converter (exit 3).
   if [ "${AUTODREAM_SKIP_EMPTY:-1}" != "0" ]; then
     filter_empty_sessions < "$SESSIONS_LIST" > "$SESSIONS_LIST.nonempty" \
       && mv "$SESSIONS_LIST.nonempty" "$SESSIONS_LIST" \
@@ -355,14 +427,23 @@ run() {
   fi
   COUNT=$(wc -l < "$SESSIONS_LIST" | tr -d ' ')
   SKIPPED_EMPTY=$(( COUNT_AFTER_PRUNE - COUNT ))
-  log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage"
+  CLAUDE_TRIAGED=$(( CLAUDE_FOUND - CLAUDE_EXCLUDED - SKIPPED_EMPTY ))
+  OMP_TRIAGED=$(( OMP_FOUND - OMP_EXCLUDED ))
+  CODEX_TRIAGED=$(( CODEX_FOUND - CODEX_EXCLUDED ))
+  EXCLUDED=$(( CLAUDE_EXCLUDED + OMP_EXCLUDED + CODEX_EXCLUDED ))
+  log "found $RAW session files; excluded $EXCLUDED autodream-own/companion, skipped $SKIPPED_EMPTY empty; $COUNT to triage"
+  if [ "${AUTODREAM_LIST_ONLY:-0}" = "1" ]; then
+    write_harness_stats | tee "$FINDINGS_DIR/run-stats.txt"
+    return 0
+  fi
 
   if [ "$COUNT" -eq 0 ]; then
+    write_harness_stats > "$FINDINGS_DIR/run-stats.txt"
     log "no sessions to triage; writing stub report and exiting"
     cat > "$REPORT_PATH" <<EOF
 # Autodream — $TARGET_DATE
 
-No Claude Code sessions were modified on this date.
+No Claude Code sessions or OMP/Codex root sessions were selected for triage on this date.
 
 (Generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
 EOF
@@ -423,42 +504,46 @@ EOF
   L1_ERRORED=$(grep -l '"error":' "$FINDINGS_DIR"/*.json 2>/dev/null | wc -l | tr -d " ")
   log "L1 done in ${L1_ELAPSED}s: $L1_OK done ($L1_ERRORED with errors), $MISSING missing (.err files: $L1_FAIL)"
 
-  # ---- Normalize the project field deterministically from the session path ----
-  # SESSION_TRIAGE.md asks the L1 worker to emit "project" by hand, and haiku does it
-  # nondeterministically: one run surfaced the SAME -Users-sean dir as "-Users-sean",
-  # "Users-sean" (dash stripped), and even the bare session UUID (filename, not dir).
-  # That splinters L2's per-project grouping. The encoded project dir is just the parent
-  # directory of the session JSONL, so derive it from each findings JSON's own
-  # session_path (already rewritten back to the real session after any slimming) and
-  # overwrite whatever the model guessed. Deterministic, idempotent on re-runs.
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$FINDINGS_DIR" <<'PY'
-import glob, json, os, sys
-findings_dir = sys.argv[1]
-fixed = 0
+  # Source-map keys are worklist paths, not model-reported session_path values.
+  # This also handles precached findings and last-round error stubs deterministically.
+  python3 - "$FINDINGS_DIR" "$SOURCE_MAP" <<'PY'
+import glob, hashlib, json, os, sys
+findings_dir, map_path = sys.argv[1:]
+with open(map_path) as f:
+    sources = {hashlib.sha1(row["normalized"].encode()).hexdigest()[:12]: row
+               for row in map(json.loads, f)}
 for path in glob.glob(os.path.join(findings_dir, "*.json")):
     try:
         with open(path) as f:
             data = json.load(f)
     except (ValueError, OSError):
-        continue  # malformed JSON: leave for the triage-failures report section
-    sp = data.get("session_path")
+        continue
+    key = os.path.basename(path).removesuffix(".json")
+    source = sources.get(key)
+    if source:
+        sp = source["source"]
+        harness = source["harness"]
+        # Encode the absolute cwd the way Claude names project dirs, so one repo
+        # groups as one project across harnesses (OMP's own dir names drop $HOME).
+        cwd = source.get("cwd") or ""
+        project = (cwd.replace("/", "-").replace(".", "-") if cwd
+                   else os.path.basename(os.path.dirname(sp)))
+        data["session_path"] = sp
+    else:
+        sp = data.get("session_path")
+        harness = "claude"
+        project = os.path.basename(os.path.dirname(sp)) if sp else ""
     if not sp:
         continue
-    proj = os.path.basename(os.path.dirname(sp))
-    if proj and data.get("project") != proj:
-        data["project"] = proj
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
-        fixed += 1
-print(fixed)
+    data["harness"] = harness
+    if project:
+        data["project"] = project
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
 PY
-    log "normalized project field from session path"
-  else
-    log "python3 not found; skipping project-field normalization (L2 grouping may show dupes)"
-  fi
+  log "normalized project field and harness from source path"
 
   # ---- Self-audit stats: runtime telemetry only the runner can see ----
   # The aggregator can't observe its own machinery — which sessions were autodream's
@@ -497,6 +582,7 @@ PY
     printf 'l1_sessions_already_done_at_start: %s\n' "$L1_PRECACHED"
     printf 'l1_sessions_freshly_processed: %s\n' "$L1_FRESHLY_PROCESSED"
     printf 'l1_elapsed_seconds: %s\n' "$L1_ELAPSED"
+    write_harness_stats
   } > "$FINDINGS_DIR/run-stats.txt"
 
   # ---- Upstream changelog window (writes changelog-window.md for L2 to read) ----
@@ -556,6 +642,9 @@ PY
   log "L2 done in ${L2_ELAPSED}s (exit $L2_RC, $attempt attempt(s))"
 
   if [ -f "$REPORT_PATH" ]; then
+    # Normalized OMP/Codex views (MBs each) are only L1 input; findings already
+    # point at the original sources. Re-runs regenerate them from the sources.
+    rm -rf "$NORMALIZED_DIR"
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
 
     # ---- Drop open-questions file into Sublime (no-op if zero questions) ----

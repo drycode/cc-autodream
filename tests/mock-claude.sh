@@ -29,7 +29,11 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   write_findings() { printf '{"session_path":"x","project":"proj-a","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"findings":[]}' > "$out"; }
   # Emit a real session_path but a deliberately WRONG project (what nondeterministic
   # haiku does), so run.sh's path-based normalization pass has something to correct.
-  write_badproject() { printf '{"session_path":"%s","project":"WRONG-PROJECT","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"findings":[]}' "$sess" > "$out"; }
+  write_badproject() {
+    # Deliberately lie about both fields: the runner must use its source map,
+    # not either model-generated guess or the temporary normalized path.
+    printf '{"session_path":"%s","harness":"wrong","project":"WRONG-PROJECT","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"findings":[]}' "$sess" > "$out"
+  }
   case "$mode" in
     l1_incomplete) : ;;                 # never write — simulates a worker that exits empty
     l1_badproject) write_badproject ;;  # wrong project + real path — exercises normalization

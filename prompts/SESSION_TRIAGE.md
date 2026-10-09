@@ -1,6 +1,6 @@
 # Session Triage — Layer 1 (haiku)
 
-You are processing ONE Claude Code session transcript and emitting structured findings as JSON. You will be called many times in parallel — be fast, structured, and deterministic.
+You are processing ONE Claude Code, OMP, or Codex session transcript and emitting structured findings as JSON. You will be called many times in parallel — be fast, structured, and deterministic.
 
 ## Inputs (first two lines of this prompt)
 
@@ -18,6 +18,7 @@ Then:
 1. **Read the session transcript** with the Read tool, using the literal path from line 1. It is JSONL — one JSON object per line. If it is larger than ~2000 lines, read it in chunks with the Read tool's `offset`/`limit` (e.g. the first 2000, a middle 2000, and the last 2000 lines) rather than all at once.
    **If a Read fails with a token-limit error** ("File content exceeds maximum allowed tokens"), the transcript has few but very long lines. Do NOT shrink-and-retry the same full read. Instead, page through the whole file with `offset`/`limit` at `limit: 10` lines per Read until you reach the end (dense files have few lines, so this is only a handful of Reads). If even a 10-line chunk errors, halve to 5 and continue from the same offset. You MUST cover the full file this way — never emit a finding saying the transcript was too large or unreadable; that is an extraction failure, not a session finding. Only if paging at `limit: 5` still errors repeatedly should you triage from what you did read, and then emit findings about the session content only.
    Note: an oversized transcript may have been **pre-slimmed** by the runner — long lines truncated, the middle elided, with `...[autodream slimmed/elided ...]...` markers. That is expected; triage what is present and don't treat the markers as session content.
+   OMP and Codex transcripts arrive as a Claude-shaped normalized view. Its first JSONL record has `type: "autodream_source"` and identifies the original `source_path`, `harness`, `cwd`, and `session_id`; it is metadata, not a conversational turn. Copy its `harness` into the findings. For native Claude Code transcripts use `claude`. Never treat elision markers or dropped thinking/images as evidence.
 2. **Extract structured findings** per the schema below.
 3. **Write the JSON** with the Write tool to the literal output path from line 2 — exactly one JSON object, no prose around it.
 4. Print `done` and exit. No commentary.
@@ -51,6 +52,7 @@ Write EXACTLY this shape to `OUTPUT_PATH`. JSON only, no markdown fence, no pros
 ```json
 {
   "session_path": "/absolute/path/to/session.jsonl",
+  "harness": "claude|omp|codex",
   "project": "encoded-cwd-folder-name",
   "started_at": "ISO8601 from first message if present, else file mtime",
   "turn_count": 42,

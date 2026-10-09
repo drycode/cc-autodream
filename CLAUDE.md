@@ -4,7 +4,7 @@ Operating notes for working on this repo. Read this before changing `bin/run.sh`
 
 ## What it is
 
-A nightly two-layer pipeline that reads yesterday's Claude Code session transcripts and produces a ranked daily report plus a few pinned MEMORY.md entries.
+A nightly two-layer pipeline that reads yesterday's Claude Code, OMP, and Codex root session transcripts and produces a ranked daily report plus a few pinned MEMORY.md entries.
 
 - **Layer 1** (`prompts/SESSION_TRIAGE.md`, haiku, fanned out one per session): reads one transcript, writes one findings JSON.
 - **Layer 2** (`prompts/PROMPT.md`, opus, single call): reads all findings JSONs, writes `dreams/YYYY-MM-DD.md`, optionally pins to project MEMORY.md.
@@ -18,6 +18,7 @@ All under `$AUTODREAM_DIR` (default `~/.claude/autodream/`) except the reports:
 - `findings/YYYY-MM-DD/sessions.txt` (+ `.raw`) — the enumerated session list (`.raw` is pre-self-filter).
 - `findings/YYYY-MM-DD/changelog-window.md` — upstream changelog diff for the date (see below).
 - `findings/YYYY-MM-DD/run-stats.txt` — self-audit telemetry the aggregator reads.
+- `findings/YYYY-MM-DD/source-map.jsonl` — normalized worklist path → original source, harness, and cwd. Normalized JSONL lives under `work/normalized/YYYY-MM-DD/`.
 - `findings/YYYY-MM-DD/touched-projects.txt` — sidecar listing projects whose MEMORY.md L2 edited (drives the optional `claude-memory gc`).
 - `cache/claude-code/` — persistent clone of `anthropics/claude-code` for the changelog.
 - `logs/run-YYYY-MM-DD.log` — full run log (run.sh tees here). `logs/launchd.{out,err}.log` — launchd's capture.
@@ -26,6 +27,14 @@ All under `$AUTODREAM_DIR` (default `~/.claude/autodream/`) except the reports:
 Scripts/prompts are symlinked into `~/.claude/autodream/` by `install.sh`, so editing the repo copy takes effect immediately. The installed launchd job is `com.samuelreed.autodream` (not the `com.user.*` example label).
 
 `install.sh` also installs that scheduled job by default (unless `--no-schedule`): it generates the plist with auto-detected label/PATH/dirs (same detection as `autodream-now.sh` — reuses an existing `*autodream*` plist's label if present, else synthesizes `com.<user>.autodream`), then `bootout`+`bootstrap`s it. `RunAtLoad` is false, so install *arms* the schedule without firing a run; the four morning triggers (03:15/06:15/09:15/12:15) match the example plist. It does not run `pmset` (sudo) — it only prints the `pmset repeat wake` recommendation. The `launchd/*.example` file is kept as a hand-editable fallback.
+
+## Multi-harness input
+
+`AUTODREAM_HARNESSES=claude,omp,codex` is the default; use a comma-separated subset to limit the scan. `AUTODREAM_LIST_ONLY=1 run.sh YYYY-MM-DD` enumerates and prints per-harness found/triaged/excluded counts, bypassing the report guard and stopping before L1. OMP roots are only `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl` and `~/.omp/profiles/<profile>/agent/sessions/<encoded-cwd>/*.jsonl`; their same-stem sidecar child directories are never traversed. Codex roots are `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
+
+`bin/normalize-transcript.py` writes a metadata record followed by user/assistant Claude-shaped turns, drops reasoning/images/instructions, and bounds tool results. Exit 3 means no user turn. The runner keys findings by normalized worklist path but rewrites `session_path` to the source and overwrites `harness`/`project` from the source map after L1 (including error stubs). Codex `project` encodes `session_meta.cwd`; OMP uses the encoded directory name.
+
+Codex companions are excluded when `session_meta.source` is an object with `subagent` (e.g. `thread_spawn` with `parent_thread_id` or `other: guardian`), or when `originator: Claude Code` and `source: vscode` appear together. In the 2026-10-07–09 metadata sample, 32 roots carried that headless bridge pair and one was a `source.subagent.thread_spawn` child. `originator` alone is insufficient; human `codex-tui`/`cli` sessions and ambiguous `codex_exec`/`exec` sessions stay eligible.
 
 ## How claude is invoked — the lean-query pattern (do not use `--bare`)
 

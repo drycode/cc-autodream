@@ -48,6 +48,8 @@ run_dream(){ # $1=root ; inherits MOCK_MODE/MOCK_CAPTURE_DIR/FANOUT + changelog 
   AUTODREAM_GC=0 AUTODREAM_CHANGELOG="${AUTODREAM_CHANGELOG:-0}" CLAUDE_BIN="$MOCK" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS="${AUTODREAM_L1_ROUNDS:-2}" \
   PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
+  OMP_SESSIONS_DIR="$1/omp/agent/sessions" OMP_PROFILES_DIR="$1/omp/profiles" \
+  CODEX_SESSIONS_DIR="$1/codex/sessions" \
   bash "$RUN" "$DATE" > "$1/run.out" 2>&1
 }
 fdir(){ printf '%s' "$1/autodream/findings/$DATE"; }   # findings dir for a root
@@ -61,6 +63,8 @@ test_happy(){
   local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
   assert_file    "$(fdir "$root")/$h.json"     "L1 wrote findings JSON"
   assert_no_file "$(fdir "$root")/$h.json.err" "no .err on success"
+  assert_eq "$(jq -r .session_path "$(fdir "$root")/$h.json")" "$root/projects/proj-a/sess1.jsonl" "native Claude source path restored"
+  assert_eq "$(jq -r .harness "$(fdir "$root")/$h.json")" claude "native Claude harness assigned"
   assert_file    "$root/dreams/$DATE.md"       "L2 wrote the report"
   rm -rf "$root"
 }
@@ -350,6 +354,86 @@ test_slim_transcript(){
   rm -rf "$root"
 }
 
+test_multiharness(){
+  echo "# OMP/Codex normalization, companion exclusion, source rewrite and counts"
+  local root; root=$(setup_env)
+  mkdir -p "$root/omp/agent/sessions/-tmp-omp" "$root/codex/sessions/2020/01/02"
+  local omp="$root/omp/agent/sessions/-tmp-omp/session.jsonl"
+  local child="$root/omp/agent/sessions/-tmp-omp/session/Worker.jsonl"
+  local codex="$root/codex/sessions/2020/01/02/rollout-human.jsonl"
+  local companion="$root/codex/sessions/2020/01/02/rollout-companion.jsonl"
+  local bridge="$root/codex/sessions/2020/01/02/rollout-bridge.jsonl"
+  mkdir -p "$(dirname "$child")"
+  printf '%s\n' '{"type":"session","id":"omp-1","cwd":"/tmp/omp","timestamp":"2020-01-02T12:00:00Z"}' \
+    '{"type":"message","timestamp":"2020-01-02T12:01:00Z","message":{"role":"user","content":[{"type":"text","text":"hello OMP"},{"type":"image","data":"secret-image-payload"}]}}' \
+    '{"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":"output"}],"isError":true}}' > "$omp"
+  printf '%s\n' '{"type":"session","parentSession":"omp-1"}' '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"child"}]}}' > "$child"
+  printf '%s\n' '{"type":"session_meta","payload":{"id":"codex-1","cwd":"/tmp/codex","originator":"codex-tui","source":"cli"}}' \
+    '{"type":"response_item","timestamp":"2020-01-02T12:00:00Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"hidden"}]}}' \
+    '{"type":"response_item","timestamp":"2020-01-02T12:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello Codex"}]}}' \
+    '{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"true\"}"}}' > "$codex"
+  printf '%s\n' '{"type":"session_meta","payload":{"id":"companion","cwd":"/tmp/codex","originator":"codex-tui","source":{"subagent":{"thread_spawn":{"parent_thread_id":"codex-1"}}}}}' \
+    '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"delegated"}]}}' > "$companion"
+  printf '%s\n' '{"type":"session_meta","payload":{"id":"bridge","cwd":"/tmp/codex","originator":"Claude Code","source":"vscode"}}' \
+    '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"headless"}]}}' > "$bridge"
+  touch -t "$STAMP" "$omp" "$child" "$codex" "$companion" "$bridge"
+  local converted="$root/converted.jsonl"
+  "$REPO/bin/normalize-transcript.py" "$omp" "$converted" --harness omp
+  assert_eq "$(jq -sr '.[0].harness' "$converted")" omp "OMP source metadata first"
+  assert_eq "$(jq -sr '[.[]|select(.type=="user")]|length' "$converted")" 1 "OMP user turn retained"
+  assert_nogrep "$converted" secret-image-payload "image content omitted"
+  assert_eq "$(jq -sr '[.[]|.message.content[]?|select(.type=="tool_result" and .is_error)]|length' "$converted")" 1 "OMP tool error retained"
+  "$REPO/bin/normalize-transcript.py" "$codex" "$converted" --harness codex
+  assert_eq "$(jq -sr '[.[]|select(.type=="user")]|length' "$converted")" 1 "Codex user turn retained"
+  assert_nogrep "$converted" hidden "developer instructions omitted"
+  local long="$root/long.jsonl"
+  printf '%s\n' '{"type":"session_meta","payload":{"id":"long"}}' \
+    '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]}}' > "$long"
+  jq -nc --arg output "$(printf '%05000d' 0)" '{type:"response_item",payload:{type:"function_call_output",output:$output}}' >> "$long"
+  "$REPO/bin/normalize-transcript.py" "$long" "$converted" --harness codex
+  assert_grep "$converted" 'autodream tool result elided' "Codex tool output bounded with explicit marker"
+  assert_eq "$(jq -sr '[.[]|.message.content[]?|select(.type=="tool_result")|.content|length]|max' "$converted")" 4031 "tool result bounded to 4000 characters plus marker"
+  local empty="$root/empty.jsonl"
+  printf '%s\n' '{"type":"session_meta","payload":{"id":"empty"}}' > "$empty"
+  "$REPO/bin/normalize-transcript.py" "$empty" "$converted" --harness codex
+  assert_eq "$?" 3 "no user turns exit 3"
+  assert_no_file "$converted" "no-user output removed"
+  "$REPO/bin/normalize-transcript.py" "$root/missing.jsonl" "$converted" --harness omp 2>/dev/null
+  assert_eq "$?" 1 "unreadable source exits 1"
+  local fork="$root/fork.jsonl"
+  printf '%s\n' '{"type":"session","id":"omp-2","parentSession":"omp-1","cwd":"/tmp/omp","timestamp":"2020-01-02T13:00:00Z"}' \
+    '{"type":"message","timestamp":"2020-01-02T12:01:00Z","message":{"role":"user","content":[{"type":"text","text":"copied parent turn"}]}}' > "$fork"
+  "$REPO/bin/normalize-transcript.py" "$fork" "$converted" --harness omp
+  assert_eq "$?" 3 "fork holding only copied parent history exits 3"
+  printf '%s\n' '{"type":"message","timestamp":"2020-01-02T13:05:00Z","message":{"role":"user","content":[{"type":"text","text":"new fork turn"}]}}' >> "$fork"
+  "$REPO/bin/normalize-transcript.py" "$fork" "$converted" --harness omp
+  assert_nogrep "$converted" 'copied parent turn' "fork drops history copied from its parent"
+  assert_grep "$converted" 'new fork turn' "fork keeps its own turns"
+  export AUTODREAM_LIST_ONLY=1
+  run_dream "$root"
+  unset AUTODREAM_LIST_ONLY
+  assert_grep "$root/run.out" 'omp_triaged: 1' "list-only prints OMP counts"
+  assert_grep "$root/run.out" 'codex_excluded: 2' "list-only prints companion exclusions"
+  assert_no_file "$root/dreams/$DATE.md" "list-only exits before L1/L2"
+  mk_session "$root" claude1
+  export MOCK_MODE=l1_badproject
+  run_dream "$root"
+  unset MOCK_MODE
+  local stats="$(fdir "$root")/run-stats.txt" oh ch
+  oh=$(hash_of "$root/autodream/work/normalized/$DATE/$(hash_of "$omp").jsonl")
+  ch=$(hash_of "$root/autodream/work/normalized/$DATE/$(hash_of "$codex").jsonl")
+  assert_eq "$(jq -r '.session_path' "$(fdir "$root")/$oh.json")" "$omp" "OMP original path restored"
+  assert_eq "$(jq -r '.session_path' "$(fdir "$root")/$ch.json")" "$codex" "Codex original path restored"
+  assert_eq "$(jq -r '.harness + ":" + .project' "$(fdir "$root")/$oh.json")" "omp:-tmp-omp" "OMP harness and encoded project"
+  assert_eq "$(jq -r '.harness + ":" + .project' "$(fdir "$root")/$ch.json")" "codex:-tmp-codex" "Codex harness and encoded cwd"
+  assert_grep "$stats" 'omp_found: 1' "sidecar child not enumerated"
+  assert_grep "$stats" 'codex_excluded: 2' "both companion patterns excluded"
+  assert_grep "$stats" 'claude_triaged: 1' "Claude retained"
+  assert_grep "$stats" 'omp_triaged: 1' "OMP retained"
+  assert_grep "$stats" 'codex_triaged: 1' "Codex retained"
+  rm -rf "$root"
+}
+
 # ---------------------------------------------------------------------------
 
 [ -x "$RUN" ]  || { echo "FATAL: $RUN not executable"; exit 1; }
@@ -376,6 +460,7 @@ test_self_audit_stats_failure_denominator
 test_self_audit_stats_precached_disambiguation
 test_normalize_project
 test_slim_transcript
+test_multiharness
 echo
 echo "----------------------------------------"
 echo "passed: $pass   failed: $fail"

@@ -35,7 +35,7 @@ Write to `REPORT_PATH`. Overwrite if present (idempotent re-runs are fine). Requ
 # Autodream — <yesterday's date>
 
 ## Activity snapshot
-- N sessions across M projects (top 3 by session count)
+- N sessions across M projects (top 3 by session count), broken down by `harness` (`claude`, `omp`, `codex`); retain the per-project grouping across harnesses.
 - Total turns / tool calls (sum from JSONs)
 - Skills invoked (top 5 by count)
 - Models used (with counts)
