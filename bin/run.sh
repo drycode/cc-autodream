@@ -223,6 +223,13 @@ for _knob in AUTODREAM_MIN_USER_TURNS AUTODREAM_MIN_MINUTES; do
     ''|*[!0-9]*) echo "FATAL: $_knob must be a non-negative integer (got '${!_knob}')" >&2; exit 1 ;;
   esac
 done
+# AUTODREAM_BACKFILL was a fork-only read-only rebuild mode, dropped in the upstream sync.
+# Refuse it rather than ignore it: an ignored flag runs the full pipeline, memory edits
+# and notification included, on a date that was meant to be rebuilt read-only.
+if [ -n "${AUTODREAM_BACKFILL:-}" ] && [ "$AUTODREAM_BACKFILL" != "0" ]; then
+  echo "FATAL: AUTODREAM_BACKFILL is no longer supported; nothing was run. For a rebuild use AUTODREAM_FORCE=1, which is NOT read-only." >&2
+  exit 1
+fi
 
 # Isolated cwd for every `claude --print` worker (see "AI-title stubs" below). The
 # workers all read/write by ABSOLUTE path, so their cwd is functionally irrelevant —
