@@ -78,6 +78,8 @@
 #                        else (bin/triage-dream.sh; never fatal). Off, nothing changes.
 #   AUTODREAM_L2_MODEL   pin the L2 aggregator model (every engine)   default: the adapter's own (claude: the CLI default)
 #   AUTODREAM_L2_MODEL_<NAME> / AUTODREAM_L1_MODEL_<NAME>  the same for one adapter only
+#   AUTODREAM_SESSION_ROOTS_<NAME>  colon-separated session roots for one adapter other than
+#                        claude, in place of its manifest's defaults   default: the manifest's
 #   AUTODREAM_MARKER_EPOCH    first date whose report is REQUIRED to carry the
 #                             open-questions marker; earlier unmarked reports are treated
 #                             as complete (legacy) rather than abandoned
@@ -681,7 +683,14 @@ adapter_roots() { # $1=adapter name -> one root per line
     printf '%s\n' "$SESSION_ROOTS" | tr ':' '\n'
     return 0
   fi
-  local roots
+  local roots up var
+  # A host whose harness keeps sessions somewhere else (one store per profile, say) names them.
+  up=$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')
+  var="AUTODREAM_SESSION_ROOTS_$up"
+  if [ -n "${!var:-}" ]; then
+    printf '%s\n' "${!var}" | tr ':' '\n'
+    return 0
+  fi
   roots=$(adapter_manifest_get "$1" '.session_roots_default[]' 2>/dev/null) || return 0
   [ -n "$roots" ] || return 0
   printf '%s\n' "$roots"

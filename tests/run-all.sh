@@ -4221,6 +4221,19 @@ test_omp_session_is_linearized_for_the_worker(){
   rm -rf "$root"
 }
 
+test_omp_session_roots_come_from_the_host_setting(){
+  echo "# AUTODREAM_SESSION_ROOTS_OMP replaces the omp manifest's default roots"
+  local root o alt fd; root=$(setup_env); mk_session "$root" sess1
+  mk_omp_session "$root" jjjj >/dev/null
+  o=$(mk_omp_session "$root" kkkk); alt="$root/store/sessions/proj-alt"; mkdir -p "$alt"
+  mv "$o" "$alt/"
+  AUTODREAM_SESSION_ROOTS_OMP="$root/elsewhere:$root/store/sessions" run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep   "$fd/sessions.txt" 'store/sessions/proj-alt/.*_kkkk.jsonl' "a session under the configured root is enumerated"
+  assert_nogrep "$fd/sessions.txt" '_jjjj.jsonl' "the manifest's default root is not"
+  rm -rf "$root"
+}
+
 test_omp_stats_describe_the_live_branch_only(){
   echo "# omp stats are computed on the live branch, so abandoned turns cannot lift a session past the noise gate"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -5401,6 +5414,7 @@ test_l1_precheck_probes_the_l1_provider
 test_worker_failure_probe_names_the_l1_provider
 test_one_dead_provider_does_not_hold_back_the_others
 test_omp_session_is_linearized_for_the_worker
+test_omp_session_roots_come_from_the_host_setting
 test_omp_nested_child_is_a_sidechain_of_its_bucket
 test_omp_session_that_cannot_be_linearized_is_an_error_record
 test_omp_stats_describe_the_live_branch_only
