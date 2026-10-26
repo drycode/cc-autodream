@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Run by review-gate-lib.sh before a review round; output is inlined into the review prompt, which
+# keeps only the last 150 lines, so the PRETEST SUMMARY block at the end is what a reviewer reads.
+# Runs the unit suites. Skips mocks, replay.sh (needs arguments) and run-all.sh (the integration
+# suite takes over 10 minutes; run it by hand before merging a run.sh change).
+# Budget: 800s in total (the harness kills the script at 900s), at most 120s per suite. A suite
+# that times out is marked TIMEOUT and the rest still run; suites left when the budget is spent
+# are listed as NOT RUN.
+set -u
+BUDGET=800
+PER_SUITE=120
+failed=(); timedout=(); skipped=(); notrun=()
+
+# adapter-claude.sh needs a usable ps; review-cmux.sh needs a pty. The Claude Code sandbox denies
+# both, and both suites pass outside it. Each is probed for what it needs, not for the sandbox.
+can_ps()  { [ -n "$(ps -o state= -p $$ 2>/dev/null | tr -d ' ')" ]; }   # same test as ps_usable in tests/adapter-claude.sh
+can_pty() { python3 -c 'import pty; pty.openpty()' >/dev/null 2>&1; }
+
+cap_cmd=()
+if command -v timeout >/dev/null 2>&1; then cap_cmd=(timeout); else echo "NOTE: no timeout binary, suites run unbounded"; fi
+
+for t in tests/*.sh; do
+  case "$t" in tests/mock-*|tests/replay.sh|tests/run-all.sh) continue ;; esac
+  echo "=== $t ==="
+  case "$t" in
+    tests/adapter-claude.sh) can_ps  || { echo "SKIPPED: $t (ps denied)"; skipped+=("$t"); continue; } ;;
+    tests/review-cmux.sh)    can_pty || { echo "SKIPPED: $t (no pty)";    skipped+=("$t"); continue; } ;;
+  esac
+  left=$((BUDGET - SECONDS))
+  if [[ $left -le 0 ]]; then echo "NOT RUN: $t (budget spent)"; notrun+=("$t"); continue; fi
+  cap=$PER_SUITE; [[ $left -ge $cap ]] || cap=$left
+  if [[ ${#cap_cmd[@]} -gt 0 ]]; then timeout "$cap" bash "$t"; else bash "$t"; fi
+  s=$?
+  [[ $s -ne 124 ]] || { echo "TIMEOUT: $t exceeded ${cap}s"; timedout+=("$t"); }
+  [[ $s -eq 0 ]] || { echo "FAILED: $t (exit $s)"; failed+=("$t"); }
+done
+
+echo "=== PRETEST SUMMARY (${SECONDS}s) ==="
+echo "failed:   ${failed[*]-none}"
+echo "timeout:  ${timedout[*]-none}"
+echo "skipped:  ${skipped[*]-none} (skipped suites did not run here; each passes outside the sandbox)"
+echo "not run:  ${notrun[*]-none}"
+[[ ${#failed[@]} -eq 0 ]]

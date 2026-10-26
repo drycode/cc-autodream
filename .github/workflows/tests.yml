@@ -1,0 +1,97 @@
+name: tests
+
+# push is filtered to main on purpose: with `pull_request:` also enabled, an
+# unfiltered push trigger runs every PR commit twice. Branch work is covered by
+# the PR trigger; both routes into main - a merge and a direct push - fire the
+# push trigger. A feature branch with no PR runs nothing, which is the trade.
+#
+# Cost: this job used to run on macOS, billed at 10x a Linux minute, for about 11 minutes.
+# 100 runs in two days (83 on one of them) came from every push to a PR branch starting a
+# fresh run while the last one was still going. Now: it runs on Linux, a newer push to the
+# same ref cancels the older run, a change that touches no code or test starts nothing, and
+# a draft PR starts nothing until it is marked ready. The launchd suites stay on macOS in
+# launchd.yml and run only when a launchd file changes.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'example/**'
+      - 'LICENSE'
+  pull_request:
+    # ready_for_review is not a default type: without it, marking a draft ready starts nothing
+    # and the job's draft skip would leave the PR with no test run.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'example/**'
+      - 'LICENSE'
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Linux. The suites went through bin/portable.sh for the BSD and GNU date and stat, so
+    # they no longer need a Mac. The suites that drive launchd (install, scheduler-label,
+    # autodream-now) run in launchd.yml on macOS, and only when launchd files change.
+    # Every suite runs against tests/mock-claude.sh, so nothing here needs a model.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # gtimeout: four oversized-gate assertions look for GNU timeout under that name,
+      # which is how it is installed on a Mac. On Linux it is plain `timeout`.
+      - name: check deps
+        run: |
+          jq --version
+          python3 --version
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$(command -v timeout)" "$HOME/.local/bin/gtimeout"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: run-all
+        run: bash tests/run-all.sh
+
+      # Every suite runs here except the launchd ones. A suite nobody runs is
+      # documentation, not a test: the adapter suites were once added without being wired
+      # in, and 314 green assertions did not include any of them.
+      - name: unit suites
+        run: |
+          rc=0
+          for t in tests/portable.sh tests/lib-project.sh tests/preflight.sh tests/adapters.sh \
+                   tests/adapter-claude.sh tests/adapter-omp.sh tests/adapter-contract.sh \
+                   tests/slim-transcript.sh tests/apply-pins.sh \
+                   tests/session-window.sh tests/dream-triage.sh tests/chunk-transcript.sh tests/merge-chunks.sh \
+                   tests/cookie-cadence.sh tests/review-skip.sh tests/review-cmux.sh tests/notes-path.sh \
+                   tests/tmp-cleanup.sh tests/x-bookmarks.sh tests/prune-worktrees.sh tests/triage-candidates.sh tests/pending-triage.sh tests/report-format.sh tests/l2-prompt.sh; do
+            echo "== $t"
+            bash "$t" || rc=1
+          done
+          exit $rc
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # The shipped scripts are held at `warning`. A cron job nobody watches
+      # cannot afford a swallowed exit code, and that is the class shellcheck
+      # actually catches (SC2164, SC2155).
+      - name: shellcheck bin + install
+        run: shellcheck --severity=warning bin/*.sh adapters/*/*.sh install.sh
+
+      # Test code is held at `error` only. tests/run-all.sh has ~24 SC2155
+      # hits from `local x=$(cmd)` in assertion helpers, where masking a return
+      # value has no consequence. Tighten this if that stops being true.
+      - name: shellcheck tests
+        run: shellcheck --severity=error tests/*.sh

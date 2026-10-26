@@ -4,7 +4,7 @@
 # ssh sessions die on disconnect, etc). launchd owns the process, so the run
 # survives the caller going away and has no time cap.
 #
-# It bootstraps a TRANSIENT one-shot LaunchAgent (label "<base>.ondemand") that runs
+# It bootstraps a TRANSIENT one-shot LaunchAgent (label "<base>.ondemand.<install hash>") that runs
 # run.sh once and exits. It never touches the scheduled nightly job.
 #
 # Usage:
@@ -16,6 +16,12 @@
 #
 # Everything is auto-detected — nothing is hardcoded to a particular user or host.
 set -euo pipefail
+
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
 
 # ---------------------------------------------------------------- arg parsing --
 DATE_ARG=""
@@ -55,7 +61,19 @@ RUN_SH="$BIN_DIR/run.sh"
 # ------------------------------------------------------------- state locations --
 # Defaults mirror run.sh's own defaults; honor the same env overrides so a
 # customized install (different AUTODREAM_DIR / DREAMS_DIR) still works.
-AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
+# Resolve the install dir from our own location, the same idiom as the siblings.
+# scheduler-label.sh decides ownership by comparing a plist's runner dir against this value,
+# so a hardcoded default never matched a custom-path install (./install.sh /custom) and the
+# .ondemand label silently left that install's namespace. Unresolved BASH_SOURCE on purpose:
+# the symlink's own directory is the install dir, while BIN_DIR above resolves through to
+# the repo.
+_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
+. "$_lib"
+resolve_install_dir "$_src"
+# The same default run.sh uses, so --watch and the plist point where run.sh writes.
 DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
 mkdir -p "$AUTODREAM_DIR/logs"
 
@@ -65,27 +83,26 @@ mkdir -p "$AUTODREAM_DIR/logs"
 if [ -n "$DATE_ARG" ]; then
   TARGET="$DATE_ARG"
 else
-  TARGET="$(date -v-1d +%Y-%m-%d)"
+  TARGET="$(pdate_yesterday)"
 fi
 
 # --------------------------------------------------------------- launchd label --
 UID_NUM="$(id -u)"
 DOMAIN="gui/$UID_NUM"
-# Reuse the base label from the installed scheduled job so the transient label sits
-# in the same namespace. Pick the plist that actually runs run.sh — not siblings
-# like *-review (review.sh). Otherwise synthesize one.
-BASE_LABEL=""
-SCHEDULED_PLIST=""
-for plist in "$HOME"/Library/LaunchAgents/*autodream*.plist; do
-  [ -e "$plist" ] || continue
-  case "$plist" in *.ondemand.plist) continue ;; esac
-  /usr/bin/grep -q 'run\.sh' "$plist" 2>/dev/null || continue
-  if l="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$plist" 2>/dev/null)"; then
-    BASE_LABEL="$l"; SCHEDULED_PLIST="$plist"; break
-  fi
-done
+# Reuse the base label from OUR installed scheduled job so the transient label sits in the
+# same namespace. scheduler-label.sh owns that decision for install.sh too; it will not hand
+# back a label belonging to another autodream install. A conflict on the default name is not
+# fatal here, because we only borrow the namespace.
+BASE_LABEL="$("$BIN_DIR/scheduler-label.sh" "$AUTODREAM_DIR" 2>/dev/null || true)"
 [ -n "$BASE_LABEL" ] || BASE_LABEL="com.$(id -un | tr -dc 'a-zA-Z0-9').autodream"
-LABEL="${BASE_LABEL}.ondemand"
+# The on-demand label always carries a hash of the resolved install dir. The bootout below
+# evicts whatever holds this label, and another install's on-demand plist lives in its own
+# AUTODREAM_DIR where no scan can see it. Two installs share a base label whenever one holds
+# the default or neither has a scheduled job, so no base-label check can rule the collision
+# out. pwd -P keeps the hash the same for a trailing slash or a symlinked path, so bootout
+# still finds this install's prior run.
+INSTALL_REAL="$(cd "$AUTODREAM_DIR" 2>/dev/null && pwd -P)" || INSTALL_REAL="${AUTODREAM_DIR%/}"
+LABEL="${BASE_LABEL}.ondemand.$(printf '%s' "$INSTALL_REAL" | shasum -a 1 | cut -c1-8)"
 PLIST="$AUTODREAM_DIR/${LABEL}.plist"
 
 # ----------------------------------------------------------------------- PATH --
@@ -110,21 +127,6 @@ env_xml+="        <key>DREAMS_DIR</key><string>${DREAMS_DIR}</string>
 "
 [ "$FORCE" = 1 ] && env_xml+="        <key>AUTODREAM_FORCE</key><string>1</string>
 "
-# Claude account: the scheduled job's CLAUDE_CONFIG_DIR/ANTHROPIC_CONFIG_DIR, so an
-# on-demand run bills the same account as the nightly one even when launched from a
-# shell scoped to another account; the caller's values only fill in when the
-# scheduled job sets none. Without this the run used the default config dir.
-for var in CLAUDE_CONFIG_DIR ANTHROPIC_CONFIG_DIR; do
-  val=""
-  if [ -n "$SCHEDULED_PLIST" ]; then
-    val="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$var" "$SCHEDULED_PLIST" 2>/dev/null || true)"
-  fi
-  val="${val:-${!var:-}}"
-  if [ -n "$val" ]; then
-    env_xml+="        <key>$var</key><string>${val}</string>
-"
-  fi
-done
 
 ONDEMAND_OUT="$AUTODREAM_DIR/logs/ondemand.out.log"
 ONDEMAND_ERR="$AUTODREAM_DIR/logs/ondemand.err.log"
@@ -175,12 +177,29 @@ if [ "$DRYRUN" = 1 ]; then
 fi
 
 # ------------------------------------------------------------------ go go go --
+# Every on-demand run for this install shares one label, and `bootout` below kills the
+# process behind it. Launching a second date while the first was still running evicted
+# the first mid-run, with no report and no error (#78). A loaded job with a live pid is
+# in flight: refuse, and name the date that holds the label. A loaded job with no pid has
+# finished and is safe to boot out. This has to run before the plist is rewritten, because
+# the holder's date is read back out of the old plist.
+# Capture first and parse the capture: a pipeline under pipefail could lose a pid it had read.
+# A print that fails means the label is not loaded; nothing to protect.
+print_out="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)" || print_out=""
+holder_pid="$(sed -n '/^[[:space:]]*pid = [0-9]/{s/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/;p;q;}' <<<"$print_out")"
+if [ -n "$holder_pid" ]; then
+  holder_date="$(sed -n 's#.*<string>\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)</string>.*#\1#p' "$PLIST" 2>/dev/null | head -n 1)"
+  echo "autodream-now: a run for ${holder_date:-another date} is still going (pid $holder_pid, label $LABEL)." >&2
+  echo "  Launching now would kill it. Wait for it, or stop it first: launchctl bootout $DOMAIN/$LABEL" >&2
+  exit 75
+fi
+
 printf '%s\n' "$PLIST_BODY" > "$PLIST"
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$PLIST" >/dev/null || { echo "autodream-now: generated plist failed plutil lint" >&2; exit 65; }
 fi
 
-# Clear any prior instance, then bootstrap. RunAtLoad is the ONLY trigger — fires the
+# Clear any finished instance, then bootstrap. RunAtLoad is the ONLY trigger — fires the
 # one-shot run exactly once. Do NOT also kickstart, or a fast run (e.g. the
 # idempotency no-op) would execute twice.
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true

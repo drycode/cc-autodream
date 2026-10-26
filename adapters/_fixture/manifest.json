@@ -1,0 +1,9 @@
+{
+  "name": "_fixture",
+  "session_roots_default": [
+    "$HOME/.autodream-fixture/store"
+  ],
+  "session_glob": "*.fixture",
+  "engine_bin": "true",
+  "l1_model": "fixture"
+}

@@ -5,4 +5,8 @@ findings/
 logs/
 inbox/
 .serena/
+# Scratch dirs for the multi-model review panels (/debate:run, /code-review).
+# 6.7MB of them accumulated untracked, and because they hold full file dumps
+# every repo-wide grep matched them dozens of times over.
+.tmp/
 .claude/settings.local.json

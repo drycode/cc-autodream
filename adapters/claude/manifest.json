@@ -1,0 +1,9 @@
+{
+  "name": "claude",
+  "session_roots_default": [
+    "$HOME/.claude/projects"
+  ],
+  "session_glob": "*.jsonl",
+  "engine_bin": "claude",
+  "l1_model": "claude-haiku-5-5"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "omp",
+  "session_roots_default": [
+    "$HOME/.omp/agent/sessions"
+  ],
+  "session_glob": "*.jsonl",
+  "engine_bin": "omp",
+  "l1_model": "deepseek/deepseek-flash",
+  "normalize": true,
+  "l2_model": "anthropic/claude-opus-5"
+}

@@ -18,6 +18,7 @@
 #   prune-self-sessions.sh --quiet         # just the summary line, no per-file paths
 #   prune-self-sessions.sh /path/projects  # scan a specific projects dir
 #   prune-self-sessions.sh --filter        # stdin: session paths; stdout: only NON-self ones
+#   prune-self-sessions.sh --is-self F     # exit 0 if F is one of ours, 1 if not
 #
 # Env:
 #   PROJECTS_DIR   default $HOME/.claude/projects
@@ -28,8 +29,19 @@ set -u
 # prompts. Anchored to the start of the message content so a human session that
 # merely *discusses* autodream (mentions SESSION_PATH= mid-conversation) is NOT
 # matched. Covers both the current literal-path framing and the legacy KEY=value
-# framing from earlier runs.
-SELF_RE='"content":"(Session transcript to analyze \(literal absolute path\)|Findings directory to aggregate \(literal absolute path\)|SESSION_PATH=|FINDINGS_DIR=)'
+# framing from earlier runs, on either transcript shape:
+#   - Claude stores user content in a string:   {"type":"user",...,"content":"..."}
+#   - OMP stores an array of items:             {"type":"message","message":{"role":"user","content":[{"type":"text","text":"..."}]}}
+# The `(content":"|text":")` anchor matches both.
+SELF_RE='"(content":"|text":")(Session transcript to analyze \(literal absolute path\)|Findings directory to aggregate \(literal absolute path\)|SESSION_PATH=|FINDINGS_DIR=)'
+
+# The FIRST user-turn record, whichever shape the transcript uses. Claude persists user
+# turns as {"type":"user",...}; OMP as {"type":"message",...} with a message object whose
+# role is "user" (assistant and tool records never match). `-m1` stops at the first record
+# matching either shape, so callers always get the first user turn.
+first_user_turn() { # $1 = jsonl path -> first user-turn record line (or nothing)
+  grep -m1 -E '"type":"user"|"type":"message".*"message":\{"role":"user"' "$1" 2>/dev/null
+}
 
 # Second vector: an orphan AI-title stub. Claude Code's async title generation writes
 # a one-line `{"type":"ai-title",...}` record into the worker's session bucket even
@@ -46,7 +58,7 @@ SELF_RE='"content":"(Session transcript to analyze \(literal absolute path\)|Fin
 # spared. Tuned against the real backlog: catches the L1/L2 title variants, spares
 # terminal-tab-title stubs and unrelated work-session orphans.
 is_self_title() { # $1 = jsonl path → exit 0 if it's an autodream orphan title stub
-  grep -q '"type":"user"' "$1" 2>/dev/null && return 1   # has conversation → not an orphan
+  first_user_turn "$1" | grep -q . && return 1   # has conversation → not an orphan
   local t
   t=$(sed -n 's/.*"aiTitle":"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
   [ -n "$t" ] || return 1
@@ -62,9 +74,21 @@ is_self_title() { # $1 = jsonl path → exit 0 if it's an autodream orphan title
 }
 
 is_self() { # $1 = jsonl path → exit 0 if it's an autodream-generated session
-  grep -m1 '"type":"user"' "$1" 2>/dev/null | grep -qE "$SELF_RE" && return 0
+  first_user_turn "$1" | grep -qE "$SELF_RE" && return 0
   is_self_title "$1"
 }
+
+# ---- --is-self: single-file predicate, for the harness adapters ----
+# The adapter contract needs to ask "is this one of ours?" about ONE file, and
+# this script is the single source of truth for that question. Exposing the
+# predicate here rather than letting each adapter carry its own copy of the
+# marker list is the whole point: a marker added above must not have to be
+# remembered in a second place.
+if [ "${1:-}" = "--is-self" ]; then
+  [ -n "${2:-}" ] || { echo "usage: $0 --is-self <session.jsonl>" >&2; exit 2; }
+  is_self "$2" && exit 0
+  exit 1
+fi
 
 # ---- --filter: stdin paths -> stdout the ones we should still triage ----
 if [ "${1:-}" = "--filter" ]; then

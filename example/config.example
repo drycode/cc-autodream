@@ -10,6 +10,15 @@
 #   cmux               launch it in its own dedicated cmux workspace.
 AUTODREAM_TRIAGE_SURFACE=cmux
 
+# How notify.sh opens the morning open-questions file. A shell snippet, not a bare
+# binary path, so flags work. Defaults to `open`, which hands the file to whatever
+# your Mac already opens .md with. Set it if you want a specific editor.
+#   AUTODREAM_OPEN=subl
+#   AUTODREAM_OPEN="code -g"
+#   AUTODREAM_OPEN="open -a Obsidian"
+# `SUBL` is still read as a deprecated alias if you set it.
+# AUTODREAM_OPEN=open
+
 # Whether the cmux triage workspace grabs focus when it launches.
 #   false (default)  open it in the background; don't yank you out of your work
 #   true             switch to the new workspace immediately
@@ -18,3 +27,50 @@ AUTODREAM_TRIAGE_SURFACE=cmux
 # Path to the cmux CLI. Only consulted when the surface above is `cmux`.
 # Defaults to the app-bundle path; uncomment to override.
 # CMUX_BIN=/Applications/cmux.app/Contents/Resources/bin/cmux
+
+# ---- Operator notes from a synced vault --------------------------------------------
+# An autodream folder inside an Obsidian (or any synced) vault. Set it and the run
+# creates the layout on its own:
+#   <vault>/inbox/*.md         drop a note here from anywhere, including your phone
+#   <vault>/processed/<date>/  where a note goes once a report has read it
+#   <vault>/reports/<date>.md  the nightly report, copied in so you can read it in bed
+# Notes written with `autodream-note.sh` keep working; both surfaces are merged into
+# one file for the aggregator. Leave unset to keep notes.md as the only surface.
+# Quote it — the iCloud path has spaces.
+# AUTODREAM_VAULT_DIR="$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/vault/autodream"
+
+# How long to wait for iCloud to download a note whose contents were evicted, before
+# giving up and reporting it as unreadable (it stays in the inbox and is retried).
+# AUTODREAM_ICLOUD_WAIT=30
+
+# ---- X bookmarks -------------------------------------------------------------------
+# Unread X bookmarks become idea fuel: the aggregator cross-references what you saved
+# against what you actually worked on. Off unless the credentials file exists. See the
+# README for how to fill it in — the official API is not usable for this ($200/mo tier).
+# X_CREDS_FILE=$HOME/.claude/autodream/x-credentials
+# X_MAX_PAGES=3
+
+# ---- Worktree and branch pruning ---------------------------------------------------
+# Removes worktrees and local/remote branches whose PR merged. Off unless this is set.
+# Uses gh, jq and git. See "Pruning finished worktrees and branches" in the README.
+# AUTODREAM_PRUNE_ROOTS="$HOME/git"
+# AUTODREAM_PRUNE_GRACE_MIN=720
+# AUTODREAM_PRUNE_MAX=25
+# AUTODREAM_PRUNE_CLOSED_DAYS=7
+# AUTODREAM_PRUNE_BUDGET_SEC=1200
+# AUTODREAM_PRUNE_KILL_SLACK=120   # hard stop this long after the budget
+# AUTODREAM_PRUNE_CALL_SEC=60      # timeout for one network call or trash
+# AUTODREAM_PRUNE_OPEN_LIMIT=200
+# AUTODREAM_PRUNE_PROTECT="live:legacy-*"   # extra branch globs to never prune, colon-separated
+# AUTODREAM_PRUNE_TRASH=1
+# AUTODREAM_PRUNE_LEDGER=$HOME/.claude/autodream/prune-ledger.tsv   # append-only record of every removal, with undo commands
+
+# Repos worth triaging (on by default; it only reads issues). The nightly report lists touched
+# repos with a pile of open issues that carry no triage state label, and suggests /triage there.
+# AUTODREAM_TRIAGE_SUGGEST=0              # 0 turns the list off
+# AUTODREAM_TRIAGE_MIN=3                  # untriaged issues needed to suggest a repo
+# AUTODREAM_TRIAGE_COOLDOWN_DAYS=7        # days before the same repo is suggested again
+# AUTODREAM_TRIAGE_GROW=3                 # growth that overrides the cooldown
+# AUTODREAM_TRIAGE_LIMIT=200              # open issues read per repo; at the limit counts show as N+
+# AUTODREAM_TRIAGE_CALL_SEC=30            # timeout for one gh call
+# AUTODREAM_TRIAGE_STATE=$HOME/.claude/autodream/triage-suggested.tsv   # cooldown record

@@ -1,0 +1,7 @@
+{
+  "name": "autodream-band",
+  "version": "0.1.0",
+  "author": { "name": "Sean Perkins" },
+  "description": "A morning band for the newest autodream report: shown only when it has open questions or a medium/high pattern, dismissed once per report, with /dream to read it and triage its open questions.",
+  "types": "./types/index.d.ts"
+}

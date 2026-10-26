@@ -1,0 +1,86 @@
+name: launchd
+
+# macOS only, and only when something that talks to launchd changes. macOS minutes bill at
+# 10x a Linux minute, and these suites are the only ones that need plutil, launchctl or a
+# real BSD userland. Everything else runs on Linux in tests.yml.
+#
+# bin/portable.sh is in the path list on purpose: its BSD branch is what a Mac runs, and
+# Linux never executes it.
+#
+# A weekly run does the whole suite on macOS, under the stock bash 3.2 the nightly uses.
+# Bash 3.2 and BSD tools are where this repo's silent failures have come from (an empty
+# array under `set -u`, a BSD-only flag), and a push that touches none of the paths below
+# would otherwise never see them.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'launchd/**'
+      - 'bin/autodream-now.sh'
+      - 'bin/scheduler-label.sh'
+      - 'bin/lib-install-dir.sh'
+      - 'bin/portable.sh'
+      - 'tests/install-*.sh'
+      - 'tests/scheduler-label.sh'
+      - 'tests/autodream-now.sh'
+      - 'tests/portable.sh'
+      - '.github/workflows/launchd.yml'
+  pull_request:
+    # ready_for_review is not a default type: without it, marking a draft ready starts nothing
+    # and the job's draft skip would leave the PR with no test run.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'install.sh'
+      - 'launchd/**'
+      - 'bin/autodream-now.sh'
+      - 'bin/scheduler-label.sh'
+      - 'bin/lib-install-dir.sh'
+      - 'bin/portable.sh'
+      - 'tests/install-*.sh'
+      - 'tests/scheduler-label.sh'
+      - 'tests/autodream-now.sh'
+      - 'tests/portable.sh'
+      - '.github/workflows/launchd.yml'
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: launchd-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  launchd:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # coreutils is for `gtimeout` only. Deliberately NOT adding coreutils' gnubin to
+      # PATH: this job is here to run the BSD date and stat.
+      - name: check deps
+        run: |
+          jq --version
+          python3 --version
+          command -v gtimeout >/dev/null 2>&1 || brew install coreutils
+          gtimeout --version | head -1
+
+      - name: launchd suites
+        run: |
+          rc=0
+          for t in tests/portable.sh tests/scheduler-label.sh tests/autodream-now.sh \
+                   tests/install-dry-run.sh tests/install-dir.sh tests/install-path.sh \
+                   tests/install-review-agent.sh tests/install-skill.sh; do
+            echo "== $t"
+            bash "$t" || rc=1
+          done
+          exit $rc
+
+      - name: full suite on macOS (weekly or by hand)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: bash tests/run-all.sh

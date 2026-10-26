@@ -1,0 +1,7 @@
+{
+  "name": "autodream-focus",
+  "version": "0.1.0",
+  "author": { "name": "Sean Perkins" },
+  "description": "A + autodream focus button at the top right of every prompt and reply: press it to tag that turn, and the next nightly autodream run takes a close look at it.",
+  "types": "./types/index.d.ts"
+}
