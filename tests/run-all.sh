@@ -4319,6 +4319,72 @@ test_omp_session_roots_come_from_the_host_setting(){
   rm -rf "$root"
 }
 
+test_l1_provenance_and_served_models_are_recorded(){
+  echo "# who each engine runs as, and which model answered each call, reach the log and run-stats"
+  local root fd; root=$(setup_env); mk_session "$root" sess1; mk_session "$root" sess2
+  run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$root/run.out" 'login for the claude engine: provider=firstParty auth=claude.ai plan=max account=test@example.com' "the log names the provider, sign-in, plan and account"
+  assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com$' "and so does run-stats"
+  assert_grep "$fd/run-stats.txt" '^l1_served_models: claude-haiku-5-5=2$' "each call is counted under the model that answered it"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "none was answered by another model"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0250$' "and the engine's cost estimates are summed"
+  rm -rf "$root"
+}
+
+test_an_engine_failing_its_login_requirement_is_handed_nothing(){
+  echo "# AUTODREAM_REQUIRE_LOGIN: a summary engine whose login does not match stops the run before it starts"
+  local root fd h o; root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_REQUIRE_LOGIN="provider=firstParty plan=pro" MOCK_CALL_LOG="$root/calls.log" run_dream "$root"
+  assert_no_file "$root/calls.log" "no worker started"
+  assert_grep "$root/run.out" 'the claude engine, which writes the summary, fails AUTODREAM_REQUIRE_LOGIN (plan is max, not pro). Refusing to start.' "the log says which requirement failed"
+  assert_nogrep "$root/run.exit" '^0$' "and the run fails"
+  rm -rf "$root"
+  echo "# an L1 engine whose login does not match is handed no transcript, while the others run"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  o=$(mk_omp_session "$root" uuuu)
+  AUTODREAM_REQUIRE_LOGIN="provider=firstParty" run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep   "$root/run.out" 'login for the omp engine: provider=unknown auth=unknown plan=unknown account=unknown' "omp reports no login, so every field is unknown"
+  assert_grep   "$root/run.out" 'the omp engine fails AUTODREAM_REQUIRE_LOGIN (provider is unknown, not firstParty)' "and fails the requirement"
+  assert_grep   "$fd/$(hash_of "$o").json" 'no L1 engine for this session' "its session gets the deterministic error record"
+  assert_grep   "$fd/$h.json" 'always run tests after edits' "while the claude session is triaged"
+  assert_grep   "$fd/run-stats.txt" '^login_omp: provider=unknown auth=unknown plan=unknown account=unknown$' "run-stats records both logins"
+  rm -rf "$root"
+  echo "# a met requirement triages as usual, and a requirement on an unknown key fails closed"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  AUTODREAM_REQUIRE_LOGIN="provider=firstParty auth=claude.ai plan=max account=test@example.com" run_dream "$root"
+  assert_grep "$(fdir "$root")/$h.json" 'always run tests after edits' "a matching login triages the session"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_REQUIRE_LOGIN="region=us" MOCK_CALL_LOG="$root/calls.log" run_dream "$root"
+  assert_no_file "$root/calls.log" "an unknown key starts no worker"
+  assert_grep "$root/run.out" 'region=us is not a provider, auth, plan or account requirement' "and says why"
+  rm -rf "$root"
+}
+
+test_a_call_answered_by_another_model_loses_its_findings(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1: findings from a call another model answered never reach L2"
+  local root fd h; root=$(setup_env); mk_session "$root" sess1
+  h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_SERVED_MODEL=claude-other-model run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep   "$fd/l1-served.tsv" "^$h	claude	claude-haiku-5-5	claude-other-model	" "the call is recorded under the model that answered it"
+  assert_grep   "$fd/run-stats.txt" '^l1_served_mismatch: [1-9]' "and counted as a mismatch"
+  assert_nogrep "$fd/$h.json" 'always run tests after edits' "the substituted model's findings are gone"
+  if grep -qs 'answered by \[claude-other-model\], not the requested model \[claude-haiku-5-5\]' "$fd/$h.json" "$fd/$h.json.err"; then
+    ok "the failure names both models"
+  else no "the failure names both models"; fi
+  rm -rf "$root"
+  echo "# without the setting a mismatch is recorded and the findings are kept"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'always run tests after edits' "the findings are kept"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 1$' "and the mismatch is counted"
+  rm -rf "$root"
+}
+
 test_omp_stats_describe_the_live_branch_only(){
   echo "# omp stats are computed on the live branch, so abandoned turns cannot lift a session past the noise gate"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -5503,6 +5569,9 @@ test_omp_sessions_run_on_another_adapters_engine
 test_the_runs_reviewer_reviews_every_source_by_default
 test_an_unusable_l1_engine_override_fails_closed
 test_omp_session_roots_come_from_the_host_setting
+test_l1_provenance_and_served_models_are_recorded
+test_an_engine_failing_its_login_requirement_is_handed_nothing
+test_a_call_answered_by_another_model_loses_its_findings
 test_omp_nested_child_is_a_sidechain_of_its_bucket
 test_omp_session_that_cannot_be_linearized_is_an_error_record
 test_omp_stats_describe_the_live_branch_only

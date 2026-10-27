@@ -82,8 +82,42 @@
 #                            model was (or was not) invoked for a given session
 #                            (e.g. a noise-gated session should never appear).
 
+#   MOCK_AUTH_STATUS=<json>  what `auth status --json` prints (the claude adapter's provenance verb);
+#                            default a logged-in claude.ai max login on Anthropic's own API.
+#   MOCK_SERVED_MODEL=<id>   the model a successful L1 call says answered it, when the call asks for
+#                            --output-format json (default: the requested --model).
+
+# `auth status` sends no stdin, so it is answered before stdin is read.
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  if [ -n "${MOCK_AUTH_STATUS:-}" ]; then
+    printf '%s\n' "$MOCK_AUTH_STATUS"
+  else
+    printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"test@example.com","subscriptionType":"max"}'
+  fi
+  exit 0
+fi
+
 input=$(cat)
 mode="${MOCK_MODE:-good}"
+
+out_format=""; req_model=""; prev=""
+for a in "$@"; do
+  case "$prev" in
+    --output-format) out_format=$a ;;
+    --model) req_model=$a ;;
+  esac
+  prev=$a
+done
+# What a successful L1 call prints: the word done, or with --output-format json the result object
+# whose modelUsage names the model that answered, as the real CLI prints it.
+l1_reply() {
+  if [ "$out_format" = json ]; then
+    jq -cn --arg m "${MOCK_SERVED_MODEL:-$req_model}" \
+      '{type: "result", subtype: "success", is_error: false, result: "done", modelUsage: {($m): {costUSD: 0.0125}}, total_cost_usd: 0.0125}'
+  else
+    echo done
+  fi
+}
 
 # $1=findings dir. Adds $MOCK_FORGED_SESSION to the runner's worklist files, the way a
 # prompt-injected model with the Write tool could.
@@ -162,7 +196,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       typed) printf '{"session_path":"x","findings":"oops"}' > "$out" ;;
       two) printf '{"error":"x","findings":[]}\n{"session_path":"x","findings":[]}\n' > "$out" ;;
     esac
-    echo done
+    l1_reply
     exit 0
   fi
   write_findings() { printf '{"session_path":"x","project":"proj-a","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"underlying_goal":null,"outcome":"fully_achieved","satisfaction_signals":{"happy":0,"satisfied":1,"dissatisfied":0,"frustrated":0},"instructions_given":["always run tests after edits"],"findings":[]}' > "$out"; }
@@ -179,13 +213,13 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       # The runner used to accept any non-empty file as success, delete both diagnostics,
       # and hand this to L2 on the final round.
       printf 'this is not json at all\n' > "$out"
-      echo done
+      l1_reply
       exit 0 ;;
     l1_wrongtype)                       # .findings present but a STRING, not an array.
       # jq -e .findings is truthy for this, so it used to pass both the idempotency read
       # and the outbound validation and reach L2 as a successful result.
       printf '{"session_path":"x","findings":"oops"}' > "$out"
-      echo done
+      l1_reply
       exit 0 ;;
     l1_noisy_fail)                      # writes nothing, but says WHY on stdout and exits
       # nonzero. This is the real shape: omp puts its diagnosis on stdout and only
@@ -231,7 +265,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       fi ;;
     l1_nested_error)                    # a real finding that happens to carry an error key
       printf '{"session_path":"x","project":"proj-a","findings":[{"category":"tool_loop","error":"ENOENT while reading a file","severity":"low"}]}' > "$out"
-      echo done ;;
+      l1_reply ;;
     l1_badproject|pins|pins_partial|pins_tamper) write_badproject ;;  # wrong project + real path — exercises normalization
     pins_tamper_l1) write_badproject; tamper_worklist "$(dirname "$out")" ;;
     pins_ledger_wipe) write_badproject; : > "$(dirname "$out")/pins-applied.tsv" ;;  # a worker empties the ledger
@@ -241,7 +275,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       if [ -f "$out.attempt" ]; then write_findings; else : > "$out.attempt"; fi ;;
     *) write_findings ;;
   esac
-  echo done
+  l1_reply
 elif printf '%s' "$input" | grep -q '^# Dream triage worker'; then
   # ---- Dream triage (bin/triage-dream.sh): its own capture files, never l2-*, so a test that
   # asserts on L2's args or stdin cannot be overwritten by this call ----

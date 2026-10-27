@@ -252,15 +252,16 @@ case "$L2" in *AUTODREAM_REPORT_END*AUTODREAM_PINS_BEGIN*) ok "the system prompt
 
 echo "# l1-argv reproduces the invocation run.sh hard-coded before the engine moved behind the adapter"
 # The expected text is copied from run.sh as it stood at b473c6f6d (the dispatch_l1 call), not
-# derived from the adapter, so this fails if the adapter and the old nightly ever disagree.
+# derived from the adapter, so this fails if the adapter and the old nightly ever disagree. The one
+# deliberate change since then is --output-format json, which `served` reads the answering model from.
 OLD_SYSPROMPT="Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit."
 OLD_SETTINGS="{\"disableAllHooks\":true}"
-printf '%s\0' /opt/test/claude --print --permission-mode bypassPermissions --model claude-haiku-5-5 --effort high \
+printf '%s\0' /opt/test/claude --print --output-format json --permission-mode bypassPermissions --model claude-haiku-5-5 --effort high \
   --no-session-persistence --tools Read Write --disable-slash-commands --strict-mcp-config \
   --settings "$OLD_SETTINGS" --system-prompt "$OLD_SYSPROMPT" > "$tmp/old-argv"
 CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-5-5 > "$tmp/new-argv"
-if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the claude L1 argv is the old hard-coded one with --effort high and --system-prompt"
-else no "the claude L1 argv is the old hard-coded one with --effort high and --system-prompt"; fi
+if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the claude L1 argv is the old hard-coded one with --output-format json, --effort high and --system-prompt"
+else no "the claude L1 argv is the old hard-coded one with --output-format json, --effort high and --system-prompt"; fi
 echo "# l1 effort: env override, off, and an invalid level"
 assert_eq "$(AUTODREAM_L1_EFFORT=low CLAUDE_BIN=/opt/test/claude "$A" l1-argv m | tr '\0' '\n' | sed -n '/^--effort$/{n;p;}')" "low" "AUTODREAM_L1_EFFORT sets the level"
 assert_eq "$(AUTODREAM_L1_EFFORT=low AUTODREAM_L1_EFFORT_CLAUDE=max CLAUDE_BIN=/opt/test/claude "$A" l1-argv m | tr '\0' '\n' | sed -n '/^--effort$/{n;p;}')" "max" "the per-adapter variable wins"
@@ -274,8 +275,33 @@ echo "# warmup-argv: the worker's flags with a one-word system prompt"
 WA=$(CLAUDE_BIN=/opt/test/claude "$A" warmup-argv claude-haiku-5-5 | tr '\0' '\n')
 assert_eq "$(printf '%s\n' "$WA" | tail -1)" "Reply with the single word ok and exit." "the system prompt asks for one word"
 LA=$(CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-5-5 | tr '\0' '\n')
-# Everything but the tools list and the system prompt must match the worker's, so the warmup takes the same auth path.
-assert_eq "$(printf '%s\n' "$WA" | sed -n '1,/^--tools$/p' | sed '$d')" "$(printf '%s\n' "$LA" | sed -n '1,/^--tools$/p' | sed '$d')" "the flags before --tools match the worker's"
+# Everything but the tools list, the system prompt and the worker's output format must match the
+# worker's, so the warmup takes the same auth path. The warmup keeps plain text: it is judged on the
+# word ok, and the output format changes only what stdout carries.
+assert_eq "$(printf '%s\n' "$WA" | sed -n '1,/^--tools$/p' | sed '$d')" "$(printf '%s\n' "$LA" | sed '/^--output-format$/{N;d;}' | sed -n '1,/^--tools$/p' | sed '$d')" "the flags before --tools match the worker's"
+
+echo "# served: the models that answered one L1 call, from its result object"
+printf '%s\n' '{"type":"result","is_error":false,"result":"done","modelUsage":{"claude-sonnet-5-5":{}},"total_cost_usd":0.25}' > "$tmp/r1"
+assert_eq "$("$A" served "$tmp/r1")" "claude-sonnet-5-5	0.25" "one model and the cost estimate"
+printf '%s\n' '{"type":"result","modelUsage":{"m-b":{},"m-a":{}},"total_cost_usd":1}' > "$tmp/r2"
+assert_eq "$("$A" served "$tmp/r2")" "m-a,m-b	1" "every model that answered, sorted"
+printf '%s\n' '{"type":"system","subtype":"init"}' '{"type":"result","modelUsage":{"m":{}}}' > "$tmp/r3"
+assert_eq "$("$A" served "$tmp/r3")" "m	" "a stream is read for its result line, and a missing cost is empty"
+printf 'done\n' > "$tmp/r4"
+"$A" served "$tmp/r4" >/dev/null 2>&1; assert_eq "$?" "1" "plain text carries no record"
+printf '%s\n' '{"type":"result","is_error":true,"result":"Not logged in","modelUsage":{}}' > "$tmp/r5"
+"$A" served "$tmp/r5" >/dev/null 2>&1; assert_eq "$?" "1" "a result no model answered carries no record"
+"$A" served "$tmp/nonesuch" >/dev/null 2>&1; assert_eq "$?" "1" "a missing file carries no record"
+
+echo "# whoami: who the engine's calls run as, read from claude auth status"
+printf '%s\n' '#!/bin/sh' '[ "$1 $2 $3" = "auth status --json" ] || exit 9' \
+  "printf '%s\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"a@example.com\",\"subscriptionType\":\"max\",\"orgId\":\"x\"}'" > "$tmp/fake-claude"
+chmod +x "$tmp/fake-claude"
+assert_eq "$(CLAUDE_BIN="$tmp/fake-claude" "$A" whoami)" '{"provider":"firstParty","auth":"claude.ai","plan":"max","account":"a@example.com"}' "provider, sign-in, plan and account, nothing else"
+printf '%s\n' '#!/bin/sh' "printf '%s\n' '{\"loggedIn\":false,\"authMethod\":\"none\",\"apiProvider\":\"firstParty\",\"subscriptionType\":null}'; exit 1" > "$tmp/fake-claude-out"
+chmod +x "$tmp/fake-claude-out"
+assert_eq "$(CLAUDE_BIN="$tmp/fake-claude-out" "$A" whoami)" '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown"}' "a failing status call reports unknown, not what it half-printed"
+assert_eq "$(CLAUDE_BIN=/usr/bin/false "$A" whoami)" '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown"}' "no status at all reports unknown"
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

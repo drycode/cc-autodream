@@ -89,6 +89,14 @@
 #                        another engine. The L1 model defaults to that engine's manifest l1_model.
 #   AUTODREAM_SESSION_ROOTS_<NAME>  colon-separated session roots for one adapter other than
 #                        claude, in place of its manifest's defaults   default: the manifest's
+#   AUTODREAM_REQUIRE_LOGIN  space-separated key=value pairs the login of every engine the run uses
+#                        must match before it is handed anything; keys provider, auth, plan,
+#                        account, as the engine's whoami verb reports them (claude: claude auth
+#                        status). An L1 engine that fails triages nothing; a failing L2 engine
+#                        stops the run before it starts      default: record only
+#                        (e.g. "provider=firstParty auth=claude.ai plan=max")
+#   AUTODREAM_L1_REQUIRE_SERVED  1 discards the findings of any L1 call answered by a model other
+#                        than the requested one (the engine's served verb)   default: 0, record only
 #   AUTODREAM_MARKER_EPOCH    first date whose report is REQUIRED to carry the
 #                             open-questions marker; earlier unmarked reports are treated
 #                             as complete (legacy) rather than abandoned
@@ -748,6 +756,38 @@ resolve_enabled_adapters() {
 review_engine() {
   resolve_enabled_adapters
   printf '%s' "${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
+}
+# Who an engine's calls run as, read once per engine before it is handed anything: the adapter's
+# whoami verb reports the API provider, sign-in method, plan and account of its login (claude:
+# `claude auth status`, no model call), and an engine without the verb reports unknown. Each answer
+# is logged once and kept in ENGINE_LOGINS (engine, provider, auth, plan, account; tab-separated)
+# for run-stats. AUTODREAM_REQUIRE_LOGIN lists key=value pairs that must all match; on a mismatch
+# this returns 1 with the reason in LOGIN_REFUSAL.
+ENGINE_LOGINS=""
+LOGIN_REFUSAL=""
+engine_login_ok() { # $1=engine -> 0 when its login meets AUTODREAM_REQUIRE_LOGIN, or nothing is required
+  local eng="$1" row who req k want have
+  row=$(printf '%s' "$ENGINE_LOGINS" | awk -F'\t' -v e="$eng" '$1 == e { print; exit }')
+  if [ -z "$row" ]; then
+    who=$(adapter_run "$eng" whoami 2>/dev/null) || who=""
+    printf '%s' "$who" | jq -e 'type == "object"' >/dev/null 2>&1 || who='{}'
+    row="$eng"$'\t'"$(printf '%s' "$who" | jq -r '[.provider, .auth, .plan, .account] | map(. // "unknown" | tostring) | @tsv')"
+    ENGINE_LOGINS="${ENGINE_LOGINS}${row}"$'\n'
+    log "login for the $eng engine: $(printf '%s' "$row" | awk -F'\t' '{ printf "provider=%s auth=%s plan=%s account=%s", $2, $3, $4, $5 }')"
+  fi
+  LOGIN_REFUSAL=""
+  for req in ${AUTODREAM_REQUIRE_LOGIN:-}; do
+    k=${req%%=*}; want=${req#*=}
+    case "$k" in
+      provider) have=$(printf '%s' "$row" | cut -f2) ;;
+      auth) have=$(printf '%s' "$row" | cut -f3) ;;
+      plan) have=$(printf '%s' "$row" | cut -f4) ;;
+      account) have=$(printf '%s' "$row" | cut -f5) ;;
+      *) LOGIN_REFUSAL="$req is not a provider, auth, plan or account requirement"; return 1 ;;
+    esac
+    [ "$have" = "$want" ] || { LOGIN_REFUSAL="$k is $have, not $want"; return 1; }
+  done
+  return 0
 }
 _enabled_adapters_uncached() {
   # "Genuinely absent" means the loader is not sourced OR the adapters tree does
@@ -2610,6 +2650,20 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         rm -f "$2"
       fi
 
+      # Which model answered, from the engine result record (adapter verb served), for every call
+      # whatever it produced, so a night accounts for each one. Engines that report nothing are
+      # recorded as unknown. With AUTODREAM_L1_REQUIRE_SERVED=1 a call answered by anything other
+      # than the requested model loses its findings, so nothing a substituted model wrote reaches L2.
+      l1served=$("$ADAPTERS_DIR/$engine/adapter.sh" served "$4" 2>/dev/null) || l1served=""
+      l1smodels=$(printf "%s" "$l1served" | cut -f1)
+      l1scost=$(printf "%s" "$l1served" | cut -s -f2)
+      printf "%s\t%s\t%s\t%s\t%s\n" "$hash" "$engine" "$model" "${l1smodels:-unknown}" "$l1scost" >> "$FINDINGS_DIR/l1-served.tsv"
+      if [ "${AUTODREAM_L1_REQUIRE_SERVED:-0}" = 1 ] && [ -s "$2" ] && [ "$l1smodels" != "$model" ]; then
+        printf "the call was answered by [%s], not the requested model [%s]; its findings are discarded (AUTODREAM_L1_REQUIRE_SERVED=1)\n" "${l1smodels:-unknown}" "$model" >> "$3"
+        rm -f "$2"
+        return 1
+      fi
+
       # Non-empty is not the same as valid. A worker that writes malformed JSON, or JSON with no
       # .findings array, used to take the success branch below: both diagnostics were deleted and
       # the file was left for L2. The dispatcher validates .findings on its way IN, so the next
@@ -3078,13 +3132,19 @@ run() {
     log_fatal "prompts/L2_SYSTEM.txt (read through bin/l2-prompt.sh) was not found beside run.sh, its link target or in AUTODREAM_DIR. Refusing to start."
     fatal_exit; return 1
   fi
-  _l2e="${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
+  _l2e=$(review_engine)
   if [ "$_l2e" != "claude" ] && [ -n "$_l2e" ]; then
     _l2m=$(adapter_l2_model "$_l2e" 2>/dev/null) || _l2m=""
     if ! adapter_run "$_l2e" l2-argv ${_l2m:+"$_l2m"} 2>/dev/null | head -c 1 | grep -q .; then
       log_fatal "the $_l2e adapter cannot produce an L2 command (model [${_l2m:-none}]); set AUTODREAM_L2_MODEL_$(printf '%s' "$_l2e" | tr 'a-z-' 'A-Z_'). Refusing to start."
       fatal_exit; return 1
     fi
+  fi
+  # The engine that writes the summary (and runs dream triage) receives every finding, so its login
+  # is held to AUTODREAM_REQUIRE_LOGIN before anything is read.
+  if ! engine_login_ok "$_l2e"; then
+    log_fatal "the $_l2e engine, which writes the summary, fails AUTODREAM_REQUIRE_LOGIN ($LOGIN_REFUSAL). Refusing to start."
+    fatal_exit; return 1
   fi
 
   # Exclude autodream's OWN headless worker/aggregator transcripts. New runs leave none
@@ -3371,6 +3431,16 @@ EOF
     [ "$(adapter_manifest_get "$_src" '.normalize' 2>/dev/null)" = "true" ] \
       && AUTODREAM_NORMALIZE_SOURCES="${AUTODREAM_NORMALIZE_SOURCES:+$AUTODREAM_NORMALIZE_SOURCES }$_src"
   done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
+  # Every L1 engine is held to AUTODREAM_REQUIRE_LOGIN before any transcript is sent (engine_login_ok).
+  # One that fails is taken out of AUTODREAM_L1_ENGINES, so the sessions it would have read get error
+  # records and no model call, the same path as a choice naming no accepted adapter.
+  local _eng
+  while IFS= read -r _eng; do
+    [ -n "$_eng" ] || continue
+    engine_login_ok "$_eng" && continue
+    log "WARNING: the $_eng engine fails AUTODREAM_REQUIRE_LOGIN ($LOGIN_REFUSAL); the sessions it would read will not be triaged"
+    AUTODREAM_L1_ENGINES=$(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v e="$_eng" 'BEGIN { OFS = "\t" } $2 == e { $2 = "" } { print }')$'\n'
+  done < <(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $2 }')
   export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS AUTODREAM_L1_ENGINES AUTODREAM_L1_PROBE_URLS AUTODREAM_NORMALIZE_SOURCES
   # AUTODREAM_L1_ROUNDS is referenced by the dispatcher subshell to decide
   # whether this is the last retry round (gates the metadata-stub fallback).
@@ -3880,6 +3950,20 @@ PY
       [ -n "$_msrc" ] || continue
       printf 'l1_engine_%s: %s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "${_mval:-none}"
     done <<< "${AUTODREAM_L1_ENGINES:-}"
+    # Who each engine the run used ran as (engine_login_ok), and which models answered the L1 calls
+    # recorded for this date in l1-served.tsv, so a report traces to the login and model behind it.
+    # The cost is the engine's own estimate at API prices, not what a subscription bills.
+    while IFS=$'\t' read -r _msrc _pprov _pauth _pplan _pacct; do
+      [ -n "$_msrc" ] || continue
+      printf 'login_%s: provider=%s auth=%s plan=%s account=%s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "$_pprov" "$_pauth" "$_pplan" "$_pacct"
+    done <<< "${ENGINE_LOGINS:-}"
+    if [ -s "$FINDINGS_DIR/l1-served.tsv" ]; then
+      printf 'l1_served_models: %s\n' "$(cut -f4 "$FINDINGS_DIR/l1-served.tsv" | sort | uniq -c | awk '{ printf "%s%s=%s", (NR > 1 ? " " : ""), $2, $1 }')"
+      printf 'l1_served_mismatch: %s\n' "$(awk -F'\t' '$4 != $3' "$FINDINGS_DIR/l1-served.tsv" | wc -l | tr -d ' ')"
+      printf 'l1_cost_usd_estimate: %s\n' "$(awk -F'\t' '$5 != "" { s += $5 } END { printf "%.4f", s }' "$FINDINGS_DIR/l1-served.tsv")"
+    else
+      printf 'l1_served_models: none\nl1_served_mismatch: 0\nl1_cost_usd_estimate: 0.0000\n'
+    fi
     # yes when the circuit breaker cut the retry budget, so a short l1_rounds_used is not
     # mistaken for a run that finished early and cleanly.
     printf 'l1_breaker_fired: %s\n' "${L1_BREAKER:-not_reached}"
