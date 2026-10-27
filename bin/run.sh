@@ -72,12 +72,21 @@
 #   AUTODREAM_WINDOW     set 0 to place a session in a report day by its file mtime
 #                        alone, as before. On (default) it is placed by the timestamps
 #                        INSIDE the transcript, and stats and L1 see only that day  default: 1
-#   AUTODREAM_L2_ENGINE  adapter whose engine runs L2                default: the first enabled adapter
+#   AUTODREAM_L2_ENGINE  adapter whose engine runs L2, and by default reviews every source's
+#                        sessions in L1 too: the run's reviewer      default: the first enabled adapter
 #   AUTODREAM_TRIAGE     set 1 to triage each delivered report into dreams/DATE.triage.md   default: 0
 #                        One extra read-only call on the L2 engine and model, after everything
 #                        else (bin/triage-dream.sh; never fatal). Off, nothing changes.
 #   AUTODREAM_L2_MODEL   pin the L2 aggregator model (every engine)   default: the adapter's own (claude: the CLI default)
 #   AUTODREAM_L2_MODEL_<NAME> / AUTODREAM_L1_MODEL_<NAME>  the same for one adapter only
+#   AUTODREAM_L1_ENGINE  accepted adapter whose engine reviews every source's sessions in L1
+#                                                                     default: the L2 engine
+#   AUTODREAM_L1_ENGINE_<NAME>  the same for one source only, e.g. AUTODREAM_L1_ENGINE_OMP=omp
+#                        Which harness holds a transcript and which engine reads it are separate:
+#                        the source's own adapter still enumerates, linearizes, describes and adds
+#                        its triage notes, and only the model call goes to the engine. A name that
+#                        is not an accepted adapter leaves those sessions untriaged, never on
+#                        another engine. The L1 model defaults to that engine's manifest l1_model.
 #   AUTODREAM_SESSION_ROOTS_<NAME>  colon-separated session roots for one adapter other than
 #                        claude, in place of its manifest's defaults   default: the manifest's
 #   AUTODREAM_MARKER_EPOCH    first date whose report is REQUIRED to carry the
@@ -731,6 +740,14 @@ resolve_enabled_adapters() {
   ENABLED_ADAPTERS=$(_enabled_adapters_uncached)
   ENABLED_ADAPTERS_RESOLVED=1
   return 0
+}
+# The run's reviewer: the engine that writes the summary (AUTODREAM_L2_ENGINE, else the first
+# enabled adapter), and by default the engine that reviews every source in L1 as well. One
+# function for both, so the per-session pass and the summary cannot drift onto different engines
+# without the host asking (AUTODREAM_L1_ENGINE, AUTODREAM_L1_ENGINE_<NAME>).
+review_engine() {
+  resolve_enabled_adapters
+  printf '%s' "${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
 }
 _enabled_adapters_uncached() {
   # "Genuinely absent" means the loader is not sourced OR the adapters tree does
@@ -1919,14 +1936,14 @@ NET_DOWN_SECONDS=0
 
 # The URLs the L1 workers need, one per distinct provider (any one answering opens the gate): each enabled adapter's own L1 model,
 # not a fixed host. Empty when no adapter has a resolvable provider, which wait_for_network reads
-# as "nothing to ask".
+# as "nothing to ask". Read from the per-source map, which was resolved against each source's L1
+# engine (AUTODREAM_L1_ENGINE_<NAME>): an omp source on the claude engine needs anthropic.
 l1_probe_urls() {
-  local src model
-  while IFS=$'\t' read -r src model; do
-    [ -n "$src" ] || continue
-    provider_probe_url "$src" "$model" 2>/dev/null
-    echo
-  done <<< "${AUTODREAM_L1_MODELS:-}" | awk 'NF && !seen[$0]++'
+  local src url
+  while IFS=$'\t' read -r src url; do
+    [ -n "$src" ] && [ -n "$url" ] || continue
+    printf '%s\n' "$url"
+  done <<< "${AUTODREAM_L1_PROBE_URLS:-}" | awk 'NF && !seen[$0]++'
 }
 
 l2_probe_url() { provider_probe_url "$L2_ENGINE" "$L2_MODEL" 2>/dev/null; }
@@ -2426,14 +2443,20 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # environment (tests/adapter-contract.sh), so nothing here names claude or omp.
     src=$(printf "%s\n" "$AUTODREAM_SOURCE_MAP" | awk -F"\t" -v h="$hash" "\$1 == h { print \$2; exit }")
     model=$(printf "%s\n" "$AUTODREAM_L1_MODELS" | awk -F"\t" -v s="$src" "\$1 == s { print \$2; exit }")
+    # The engine comes from the same parent-built environment (AUTODREAM_L1_ENGINE_<NAME>), and is
+    # usually the source itself. An empty one means the override named no accepted adapter.
+    engine=$(printf "%s\n" "$AUTODREAM_L1_ENGINES" | awk -F"\t" -v s="$src" "\$1 == s { print \$2; exit }")
     argv=()
     envs=()
     case "$src" in
       ""|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) src="" ;;
     esac
-    if [ -n "$src" ] && [ -n "$model" ] && [ -x "$ADAPTERS_DIR/$src/adapter.sh" ]; then
-      while IFS= read -r -d "" arg; do argv+=("$arg"); done < <("$ADAPTERS_DIR/$src/adapter.sh" l1-argv "$model" 2>/dev/null)
-      while IFS= read -r line; do [ -n "$line" ] && envs+=("$line"); done < <("$ADAPTERS_DIR/$src/adapter.sh" l1-env 2>/dev/null)
+    case "$engine" in
+      ""|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) engine="" ;;
+    esac
+    if [ -n "$src" ] && [ -n "$engine" ] && [ -n "$model" ] && [ -x "$ADAPTERS_DIR/$engine/adapter.sh" ]; then
+      while IFS= read -r -d "" arg; do argv+=("$arg"); done < <("$ADAPTERS_DIR/$engine/adapter.sh" l1-argv "$model" 2>/dev/null)
+      while IFS= read -r line; do [ -n "$line" ] && envs+=("$line"); done < <("$ADAPTERS_DIR/$engine/adapter.sh" l1-env 2>/dev/null)
     fi
     if [ "${#argv[@]}" -eq 0 ]; then
       # Deterministic, so a structured error record that is left in place and skipped on re-run
@@ -3316,16 +3339,31 @@ EOF
   ADAPTERS_DIR=$(adapters_root)
   AUTODREAM_SOURCE_MAP=$(cat "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
   AUTODREAM_L1_MODELS=""
+  AUTODREAM_L1_ENGINES=""
   AUTODREAM_L1_PROBE_URLS=""
-  local _src _model _purl
+  local _src _model _purl _engine _reviewer
+  _reviewer=$(review_engine)
   while IFS= read -r _src; do
     [ -n "$_src" ] || continue
-    _model=$(adapter_l1_model "$_src" 2>/dev/null) || _model=""
+    # The engine first: a choice that names no accepted adapter leaves this source with no model,
+    # so its sessions get error records instead of a call on some other engine.
+    _engine=$(adapter_l1_engine "$_src" "$_reviewer" 2>/dev/null) || _engine=""
+    _model=""
+    if [ -n "$_engine" ]; then
+      _model=$(adapter_l1_model "$_src" "$_reviewer" 2>/dev/null) || _model=""
+    else
+      log "WARNING: the L1 engine chosen for adapter $_src names no accepted adapter; its sessions will not be triaged"
+    fi
     AUTODREAM_L1_MODELS="${AUTODREAM_L1_MODELS}${_src}"$'\t'"${_model}"$'\n'
-    _purl=$(provider_probe_url "$_src" "$_model" 2>/dev/null) || _purl=""
+    AUTODREAM_L1_ENGINES="${AUTODREAM_L1_ENGINES}${_src}"$'\t'"${_engine}"$'\n'
+    _purl=$(provider_probe_url "$_engine" "$_model" 2>/dev/null) || _purl=""
     AUTODREAM_L1_PROBE_URLS="${AUTODREAM_L1_PROBE_URLS}${_src}"$'\t'"${_purl}"$'\n'
     [ -n "$_model" ] || log "WARNING: no L1 model resolves for adapter $_src; its sessions will not be triaged"
-    log "L1 model for $_src: ${_model:-<none>}"
+    if [ -n "$_engine" ] && [ "$_engine" != "$_src" ]; then
+      log "L1 model for $_src: ${_model:-<none>} (on the $_engine engine)"
+    else
+      log "L1 model for $_src: ${_model:-<none>}"
+    fi
   done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
   AUTODREAM_NORMALIZE_SOURCES=""
   while IFS= read -r _src; do
@@ -3333,7 +3371,7 @@ EOF
     [ "$(adapter_manifest_get "$_src" '.normalize' 2>/dev/null)" = "true" ] \
       && AUTODREAM_NORMALIZE_SOURCES="${AUTODREAM_NORMALIZE_SOURCES:+$AUTODREAM_NORMALIZE_SOURCES }$_src"
   done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
-  export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS AUTODREAM_L1_PROBE_URLS AUTODREAM_NORMALIZE_SOURCES
+  export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS AUTODREAM_L1_ENGINES AUTODREAM_L1_PROBE_URLS AUTODREAM_NORMALIZE_SOURCES
   # AUTODREAM_L1_ROUNDS is referenced by the dispatcher subshell to decide
   # whether this is the last retry round (gates the metadata-stub fallback).
   export AUTODREAM_L1_ROUNDS
@@ -3387,9 +3425,12 @@ EOF
     L1_WARMUP=ok
     while IFS=$'\t' read -r _wsrc _wmodel; do
       [ -n "$_wsrc" ] && [ -n "$_wmodel" ] || continue
+      # Warm the engine the workers will call, which an AUTODREAM_L1_ENGINE_<NAME> override moves.
+      _weng=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v s="$_wsrc" '$1 == s { print $2; exit }')
+      [ -n "$_weng" ] || continue
       _wargv=(); _wenv=()
-      while IFS= read -r -d "" _a; do _wargv+=("$_a"); done < <(adapter_run "$_wsrc" warmup-argv "$_wmodel" 2>/dev/null)
-      while IFS= read -r _l; do [ -n "$_l" ] && _wenv+=("$_l"); done < <(adapter_run "$_wsrc" l1-env 2>/dev/null)
+      while IFS= read -r -d "" _a; do _wargv+=("$_a"); done < <(adapter_run "$_weng" warmup-argv "$_wmodel" 2>/dev/null)
+      while IFS= read -r _l; do [ -n "$_l" ] && _wenv+=("$_l"); done < <(adapter_run "$_weng" l1-env 2>/dev/null)
       if [ "${#_wargv[@]}" -eq 0 ]; then
         L1_WARMUP=failed
         log "L1 auth warmup FAILED for $_wsrc: the adapter printed no warmup command"
@@ -3414,7 +3455,7 @@ EOF
         log "L1 auth warmup FAILED for $_wsrc (exit $_wrc): stdout=[${_wout:-<empty>}] stderr=[$(head -c 300 "$_werr" 2>/dev/null | tr '\n' ' ')]"
       fi
     done < <(printf '%s' "$AUTODREAM_L1_MODELS")
-    unset _wsrc _wmodel _wargv _wenv _a _l _werr _wout _wrc _wword
+    unset _wsrc _wmodel _weng _wargv _wenv _a _l _werr _wout _wrc _wword
   fi
 
   L1_START=$(date +%s)
@@ -3834,6 +3875,11 @@ PY
       [ -n "$_msrc" ] || continue
       printf 'l1_model_%s: %s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "${_mval:-none}"
     done <<< "$AUTODREAM_L1_MODELS"
+    # And on which adapter's engine, which AUTODREAM_L1_ENGINE_<NAME> can move off the source.
+    while IFS=$'\t' read -r _msrc _mval; do
+      [ -n "$_msrc" ] || continue
+      printf 'l1_engine_%s: %s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "${_mval:-none}"
+    done <<< "${AUTODREAM_L1_ENGINES:-}"
     # yes when the circuit breaker cut the retry budget, so a short l1_rounds_used is not
     # mistaken for a run that finished early and cleanly.
     printf 'l1_breaker_fired: %s\n' "${L1_BREAKER:-not_reached}"
@@ -4053,7 +4099,7 @@ PY
   #
   # bash 3.2 with set -u treats "${a[@]}" on an EMPTY array as an unbound variable, so every
   # expansion of the argv and env arrays below is guarded.
-  L2_ENGINE="${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
+  L2_ENGINE=$(review_engine)
   L2_MODEL=$(adapter_l2_model "$L2_ENGINE" 2>/dev/null) || L2_MODEL=""
   log "L2 engine: $L2_ENGINE, model: ${L2_MODEL:-<engine default>}"
   # Recorded because neither is fixed by this file. When a report's character changes, the first

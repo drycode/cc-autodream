@@ -175,6 +175,23 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
   adapter_l1_model ../evil >/dev/null 2>&1; assert_eq "$?" "1" "an unsafe name resolves nothing"
   unset AUTODREAM_L1_MODEL AUTODREAM_L1_MODEL_OMP
   adapter_l1_model nonesuch >/dev/null 2>&1; assert_eq "$?" "1" "an adapter with no manifest and no override resolves nothing"
+  assert_eq "$(adapter_l1_engine omp)" "omp" "with no reviewer passed, a source reviews its own sessions"
+  assert_eq "$(adapter_l1_engine omp claude)" "claude" "the run's reviewer reviews every source"
+  assert_eq "$(adapter_l1_model omp claude)" "claude-haiku-5-5" "and the default model is the reviewer's, not the source's"
+  assert_eq "$(AUTODREAM_L1_ENGINE=omp adapter_l1_engine claude claude)" "omp" "AUTODREAM_L1_ENGINE replaces the reviewer for every source"
+  assert_eq "$(AUTODREAM_L1_ENGINE=omp AUTODREAM_L1_ENGINE_CLAUDE=claude adapter_l1_engine claude omp)" "claude" "and the per-source form beats it"
+  assert_eq "$(AUTODREAM_L1_ENGINE= adapter_l1_engine omp claude)" "claude" "an empty AUTODREAM_L1_ENGINE is not a choice"
+  adapter_l1_engine omp nonesuch >/dev/null 2>&1; assert_eq "$?" "1" "a reviewer that is not an accepted adapter resolves nothing"
+  AUTODREAM_L1_ENGINE_OMP=claude
+  assert_eq "$(adapter_l1_engine omp)" "claude" "the per-source engine choice moves it"
+  assert_eq "$(adapter_l1_model omp)" "claude-haiku-5-5" "and its default model is the engine's, not its own"
+  assert_eq "$(AUTODREAM_L1_MODEL_OMP=claude-x adapter_l1_model omp)" "claude-x" "an explicit model still wins"
+  AUTODREAM_L1_ENGINE_OMP=nonesuch
+  adapter_l1_engine omp >/dev/null 2>&1; assert_eq "$?" "1" "an override naming no accepted adapter resolves nothing"
+  adapter_l1_model omp >/dev/null 2>&1; assert_eq "$?" "1" "and leaves no default model to fall back on"
+  AUTODREAM_L1_ENGINE_OMP=../evil
+  adapter_l1_engine omp >/dev/null 2>&1; assert_eq "$?" "1" "an unsafe engine name resolves nothing"
+  unset AUTODREAM_L1_ENGINE_OMP
   printf '%s %s\n' "$pass" "$fail" > "$l1counts"
 )
 # A missing counts file means the subshell died before reporting, which is a failure, not a
