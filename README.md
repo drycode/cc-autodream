@@ -78,9 +78,11 @@ cd ~/git/autodream
 ```
 
 `--adapters` lists the harnesses to read, and `--l2-engine` names the one whose CLI runs the
-aggregation pass. Pin a model per harness in `config` with `AUTODREAM_L1_MODEL_<NAME>` and
-`AUTODREAM_L2_MODEL_<NAME>` (for example `AUTODREAM_L1_MODEL_OMP`). A host with only one harness
-installed needs none of this.
+aggregation pass. That engine also reviews every harness's sessions in L1 unless `config` says
+otherwise: `AUTODREAM_L1_ENGINE_<NAME>=<name>` keeps one harness on its own engine (for example
+`AUTODREAM_L1_ENGINE_CLAUDE=claude`). Pin a model per engine with `AUTODREAM_L1_MODEL_<NAME>` and
+`AUTODREAM_L2_MODEL_<NAME>` (for example `AUTODREAM_L1_MODEL_OMP`, the model of every L1 call the
+omp engine makes). A host with only one harness installed needs none of this.
 
 This symlinks `bin/*.sh`, `prompts/*.md` and the `adapters/` tree into `~/.claude/autodream/`, creates
 `~/.claude/dreams/`, and on macOS installs and bootstraps the nightly launchd
@@ -223,7 +225,9 @@ Commands, fallbacks and how to test it are in [`mods/autodream-band/README.md`](
 the changelog window, the review popup dedup) and the OMP session reader is `adapters/omp/`.
 To move an existing OMP install: unload its launchd jobs, run
 `./install.sh --adapters claude,omp --l2-engine omp`, and carry its L1 model over as
-`AUTODREAM_L1_MODEL_OMP`. Do not copy its `SESSION_ROOTS` line: the omp adapter finds
+`AUTODREAM_L1_MODEL_OMP`. With omp as the L2 engine it reviews the Claude Code sessions too, on
+that model; add `AUTODREAM_L1_ENGINE_CLAUDE=claude` to keep them on Claude Code's own engine and
+model. Do not copy its `SESSION_ROOTS` line: the omp adapter finds
 `~/.omp/agent/sessions` itself, and a stray root would make the Claude adapter parse OMP files.
 The full runbook, with rollback, is in `docs/plans/2026-10-03-omp-adapter.md`.
 

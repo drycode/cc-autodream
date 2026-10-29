@@ -37,7 +37,15 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  # The suite is split into four shards that run at once, each a quarter of the tests and unit
+  # suites chosen round-robin (RUNALL_SHARD=i/n in tests/run-all.sh; tests/shard.sh proves the
+  # shards partition the suite exactly). One job ran them all in 6 to 7 minutes of a run that took
+  # 9; the shards finish in about two. Keep the matrix and the /4 below in step: tests/shard.sh
+  # fails if they disagree, because a shard that no job runs is a quarter of the suite nobody runs.
+  # The unit suites used to run a second time in their own step here. run-all.sh already runs every
+  # one of them, so that step only repeated 47 seconds of work.
+  shards:
+    name: test (${{ matrix.shard }}/4)
     # Linux. The suites went through bin/portable.sh for the BSD and GNU date and stat, so
     # they no longer need a Mac. The suites that drive launchd (install, scheduler-label,
     # autodream-now) run in launchd.yml on macOS, and only when launchd files change.
@@ -45,6 +53,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -58,25 +70,39 @@ jobs:
           ln -sf "$(command -v timeout)" "$HOME/.local/bin/gtimeout"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: run-all
-        run: bash tests/run-all.sh
+      - name: run-all, shard ${{ matrix.shard }} of 4
+        env:
+          RUNALL_TIMES: ${{ runner.temp }}/times.txt
+        run: RUNALL_SHARD=${{ matrix.shard }}/4 bash tests/run-all.sh
 
-      # Every suite runs here except the launchd ones. A suite nobody runs is
-      # documentation, not a test: the adapter suites were once added without being wired
-      # in, and 314 green assertions did not include any of them.
-      - name: unit suites
+      # What this shard spent its time on, slowest first. Run on failure too: a slow shard is
+      # exactly when this is wanted. The split is round-robin by position; if one shard keeps
+      # finishing well behind the others, these numbers are what a weighted split needs.
+      - name: slowest entries in this shard
+        if: always()
+        env:
+          RUNALL_TIMES: ${{ runner.temp }}/times.txt
         run: |
-          rc=0
-          for t in tests/portable.sh tests/lib-project.sh tests/preflight.sh tests/adapters.sh \
-                   tests/adapter-claude.sh tests/adapter-omp.sh tests/adapter-contract.sh \
-                   tests/slim-transcript.sh tests/apply-pins.sh \
-                   tests/session-window.sh tests/dream-triage.sh tests/chunk-transcript.sh tests/merge-chunks.sh \
-                   tests/cookie-cadence.sh tests/review-skip.sh tests/review-cmux.sh tests/notes-path.sh \
-                   tests/tmp-cleanup.sh tests/x-bookmarks.sh tests/prune-worktrees.sh tests/triage-candidates.sh tests/pending-triage.sh tests/report-format.sh tests/l2-prompt.sh; do
-            echo "== $t"
-            bash "$t" || rc=1
-          done
-          exit $rc
+          test -f "$RUNALL_TIMES" || { echo "no timings written"; exit 0; }
+          awk '{ t += $1 } END { print "total seconds in tests and suites: " t }' "$RUNALL_TIMES"
+          sort -rn "$RUNALL_TIMES" | head -12
+
+  # One check that stands for the four shards, under the name the single job always had, so
+  # anything that waits on `test` keeps working. A draft PR skips the shards and so skips this.
+  test:
+    needs: shards
+    # !cancelled(), not always(): a newer push cancels this run, and the shards then read as cancelled.
+    # always() would run this job anyway and fail it, painting the superseded commit red.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every shard passed
+        env:
+          SHARDS: ${{ needs.shards.result }}
+        run: |
+          echo "shards: $SHARDS"
+          test "$SHARDS" = success
 
   shellcheck:
     runs-on: ubuntu-latest

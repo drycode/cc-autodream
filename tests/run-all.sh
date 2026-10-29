@@ -27,6 +27,35 @@ DATE=2020-01-02          # fixed target date; sessions are touched into this day
 STAMP=202001021200       # touch -t form of DATE at noon
 
 pass=0; fail=0
+
+# Sharding. RUNALL_SHARD=i/n runs every n-th test and unit suite, counted in the order they appear
+# below, so n jobs run the whole suite exactly once between them (tests/shard.sh proves it).
+# Round-robin balances well here: the slow tests are spread across the file, and with four shards
+# the longest holds 26% of the run time against an ideal 25%. RUNALL_LIST=1 prints what this shard
+# would run, one entry per line, and runs nothing. Unset, it is the whole suite, as it always was.
+_shard_i=0; _shard_n=1; _list="${RUNALL_LIST:-}"
+if [ -n "${RUNALL_SHARD:-}" ]; then
+  # Strict: digits, one slash, digits. Anything else is refused, never read as the whole suite.
+  _bad(){ echo "run-all: RUNALL_SHARD must be i/n with 0 <= i < n (got '$RUNALL_SHARD')" >&2; exit 2; }
+  case "$RUNALL_SHARD" in */*) ;; *) _bad ;; esac
+  _si=${RUNALL_SHARD%%/*}; _sn=${RUNALL_SHARD#*/}
+  case "$_si$_sn" in ''|*[!0-9]*) _bad ;; esac
+  [ -n "$_si" ] && [ -n "$_sn" ] || _bad
+  _shard_i=$((10#$_si)); _shard_n=$((10#$_sn))   # 10#: "08" is eight, not a bad octal
+  if [ "$_shard_n" -lt 1 ] || [ "$_shard_i" -ge "$_shard_n" ]; then _bad; fi
+fi
+_idx=0
+_owns(){ _idx=$((_idx + 1)); [ $((_idx % _shard_n)) -eq "$_shard_i" ]; }
+# RUNALL_TIMES=<file> appends "<seconds> <name>" for every test and unit suite it runs, so a CI job
+# can show which entries are slow and where a better split would come from.
+_timed(){ [ -n "${RUNALL_TIMES:-}" ] && printf '%s %s\n' "$((SECONDS - $2))" "$1" >> "$RUNALL_TIMES"; return 0; }
+_run(){
+  _owns || return 0
+  if [ -n "$_list" ]; then printf '%s\n' "$1"; return 0; fi
+  local _t0=$SECONDS
+  "$@"
+  _timed "$1" "$_t0"
+}
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
 assert_file(){     [ -f "$1" ] && ok "$2" || no "$2 (missing: $1)"; }
@@ -3283,166 +3312,168 @@ test_overlap_not_measured_malformed_output(){
 [ -x "$RUN" ]  || { echo "FATAL: $RUN not executable"; exit 1; }
 [ -x "$MOCK" ] || { echo "FATAL: $MOCK not executable"; exit 1; }
 
-echo "cc-autodream integration tests (mock claude)"
-echo
-test_happy
-test_session_stats
-test_unreadable
-test_incomplete
-test_idempotent
-test_revalidates_garbage
-test_no_sessions
-test_l2_uses_the_default_model
-test_l2_model_pin_is_honoured
-test_framing
-test_l1_engine_comes_from_the_adapter
-test_l1_engine_cannot_be_redirected_by_a_worker
-test_l1_session_with_no_resolvable_engine_is_an_error_record
-test_worker_failure_records_exit_code_and_stdout
-test_malformed_worker_output_is_a_failure_with_its_evidence
-test_findings_must_be_an_array_not_merely_present
-test_stale_wrongtype_findings_is_redispatched
-test_failure_class_found_through_an_old_install
-test_failure_class_provider_matrix
-test_oversized_gate_context_overflow
-test_oversized_gate_errored_noisy
-test_oversized_gate_errored_silent
-test_oversized_gate_script_context_overflow
-test_oversized_gate_script_err_without_exit_code
-test_oversized_gate_script_missing_err
-test_oversized_gate_script_mixed_size_and_provider
-test_oversized_gate_script_silent
-test_oversized_gate_script_stdout_section_boundary
-test_oversized_gate_script_unmeasurable_only
-test_a_nested_error_key_is_not_a_failed_triage
-test_l1_hang_is_bounded
-test_intrinsic_124_is_not_a_timeout
-test_l1_timeout_must_be_positive
-test_l1_warmup_timeout_must_be_positive
-test_warmup_can_be_disabled
-test_warmup_diagnostic_stdout_is_a_failure_not_ok
-test_warmup_empty_stdout_is_a_failure_not_ok
-test_warmup_runs_before_the_fanout
-test_breaker_needs_two_barren_rounds_not_one
-test_a_deterministic_failure_trips_the_breaker
-test_a_flaky_worker_does_not_trip_the_breaker
-test_warmup_works_for_an_adapter_with_no_environment
-test_net_up_survives_a_curl_that_stalls_after_the_reply
-test_net_up_probes_the_host_it_is_given
-test_wait_for_network_cap_bounds_the_probe
-test_network_down_defers_the_date
-test_oversized_gate_script_deferred
-test_route_lost_after_the_precheck_still_defers
-test_missing_curl_is_not_read_as_an_outage
-test_a_transient_outage_is_ridden_out_not_deferred
-test_no_curl_does_not_defer_a_healthy_run
-test_unexecutable_curl_is_not_read_as_an_outage
-test_provider_refusal_defers_without_a_stub
-test_provider_402_and_missing_curl_still_defer
-test_rounds_used_counts_rounds_that_dispatched
-test_changelog
-test_changelog_multi_source
-test_changelog_refuses_foreign_cache_dir
-test_changelog_single_remote_suppresses_defaults
-test_changelog_dedupe_is_scoped_to_the_release
-test_changelog_survives_a_force_pushed_remote
-test_prune_helper
-test_autodream_now_from_a_checkout_uses_the_default_install
-test_self_session_excluded
-test_skip_empty_sessions
-test_skip_empty_disabled
-test_l1_retry
-test_idempotency_guard
-test_idempotency_guard_needs_a_complete_report
-test_run_lock_is_per_date_and_live_holders_win
-test_run_lock_is_reclaimed_from_a_dead_holder
-test_killed_run_temps_are_swept_at_the_start_of_the_next_run
-test_self_audit_stats
-test_self_audit_stats_failure_denominator
-test_self_audit_stats_precached_disambiguation
-test_normalize_project
-test_citation_check_resolves
-test_citation_check_flags_gated_and_missing
-test_citation_counters_in_run_stats
-test_citation_check_counts_bare_hashes
-test_citation_check_resolves_session_id_tail
-test_slim_transcript
-test_facet_fields_plumbed
-test_noise_gate_trivial
-test_noise_gate_short_duration
-test_noise_gate_subagent_carveout
-test_noise_gate_stats
-test_noise_gate_env_override
-test_oversized_gate_zero
-test_oversized_gate_total
-test_oversized_gate_errored
-test_stats_sidecar_ok
-test_stats_sidecar_missing_counted
-test_stats_sidecar_missing_keeps_oversized_count
-test_stats_sidecar_malformed_counted
-test_stats_sidecar_non_numeric_counted
-test_runner_provenance
-test_runner_provenance_no_git
-test_runner_provenance_through_symlink
-test_runner_provenance_relative_symlink
-test_runner_provenance_unresolvable_chain
-test_oversized_gate_script
-test_oversized_gate_script_open
-test_oversized_gate_script_empty
-test_oversized_gate_script_args
-test_notify_count
-test_notify_open_command
-test_notify_dryrun
-test_runner_dirty_ignores_untracked
-test_overlap_pair
-test_overlap_triple
-test_overlap_none
-test_overlap_drops_advisor_sidecars
-test_overlap_drops_nested_sidecars
-test_fanout_stats
-test_overlap_not_measured_missing_bin
-test_overlap_not_measured_empty_output
-test_overlap_not_measured_malformed_output
-test_notes_no_surfaces
-test_notes_from_notes_file
-test_notes_from_vault_inbox
-test_notes_vault_expired_dropped
-test_notes_vault_archived_after_report
-test_notes_vault_not_archived_without_report
-test_notes_vault_report_published
-test_notes_vault_unreadable_note_stays
-test_config_file_sourced
-test_config_env_wins_over_config
-test_notes_header_only_file_does_not_abort
-test_notes_icloud_placeholder_is_counted
-test_notes_placeholder_and_real_file_counted_once
-test_notes_expiry_uses_report_date
-test_focus_tag_reaches_the_report_and_is_consumed
-test_focus_tag_is_held_for_its_day
-test_focus_tag_day_is_the_local_day
-test_focus_tag_not_consumed_without_report
-test_focus_tag_pending_set
-test_focus_tag_retag_after_consume_is_offered_again
-test_focus_tag_forced_rebuild_keeps_its_tags
-test_focus_tag_unreadable_file_is_reported
-test_focus_tag_unparseable_time_is_dated_by_the_report
-test_focus_tag_text_cannot_forge_a_note
-test_focus_tag_archive_is_idempotent
-test_focus_tag_without_jq_is_reported
-test_force_rebuild_failed_l2_does_not_consume
-test_unmovable_stale_report_disarms_consuming
-test_partial_report_does_not_consume
-test_partial_report_keeps_previous
-test_partial_report_does_not_block_retry
-test_complete_report_retires_partials
-test_dead_stdout_does_not_kill_the_run
-test_unassembled_dates_are_surfaced
-test_unassembled_ignores_a_finished_date
-test_pre_marker_report_is_not_abandoned
-test_missing_report_still_abandoned_before_epoch
-test_no_sessions_stub_carries_marker
-test_old_date_reprocess_does_not_consume
-test_config_unbound_var_does_not_kill_run
+if [ -z "$_list" ]; then
+  echo "cc-autodream integration tests (mock claude)"
+  echo
+fi
+_run test_happy
+_run test_session_stats
+_run test_unreadable
+_run test_incomplete
+_run test_idempotent
+_run test_revalidates_garbage
+_run test_no_sessions
+_run test_l2_uses_the_default_model
+_run test_l2_model_pin_is_honoured
+_run test_framing
+_run test_l1_engine_comes_from_the_adapter
+_run test_l1_engine_cannot_be_redirected_by_a_worker
+_run test_l1_session_with_no_resolvable_engine_is_an_error_record
+_run test_worker_failure_records_exit_code_and_stdout
+_run test_malformed_worker_output_is_a_failure_with_its_evidence
+_run test_findings_must_be_an_array_not_merely_present
+_run test_stale_wrongtype_findings_is_redispatched
+_run test_failure_class_found_through_an_old_install
+_run test_failure_class_provider_matrix
+_run test_oversized_gate_context_overflow
+_run test_oversized_gate_errored_noisy
+_run test_oversized_gate_errored_silent
+_run test_oversized_gate_script_context_overflow
+_run test_oversized_gate_script_err_without_exit_code
+_run test_oversized_gate_script_missing_err
+_run test_oversized_gate_script_mixed_size_and_provider
+_run test_oversized_gate_script_silent
+_run test_oversized_gate_script_stdout_section_boundary
+_run test_oversized_gate_script_unmeasurable_only
+_run test_a_nested_error_key_is_not_a_failed_triage
+_run test_l1_hang_is_bounded
+_run test_intrinsic_124_is_not_a_timeout
+_run test_l1_timeout_must_be_positive
+_run test_l1_warmup_timeout_must_be_positive
+_run test_warmup_can_be_disabled
+_run test_warmup_diagnostic_stdout_is_a_failure_not_ok
+_run test_warmup_empty_stdout_is_a_failure_not_ok
+_run test_warmup_runs_before_the_fanout
+_run test_breaker_needs_two_barren_rounds_not_one
+_run test_a_deterministic_failure_trips_the_breaker
+_run test_a_flaky_worker_does_not_trip_the_breaker
+_run test_warmup_works_for_an_adapter_with_no_environment
+_run test_net_up_survives_a_curl_that_stalls_after_the_reply
+_run test_net_up_probes_the_host_it_is_given
+_run test_wait_for_network_cap_bounds_the_probe
+_run test_network_down_defers_the_date
+_run test_oversized_gate_script_deferred
+_run test_route_lost_after_the_precheck_still_defers
+_run test_missing_curl_is_not_read_as_an_outage
+_run test_a_transient_outage_is_ridden_out_not_deferred
+_run test_no_curl_does_not_defer_a_healthy_run
+_run test_unexecutable_curl_is_not_read_as_an_outage
+_run test_provider_refusal_defers_without_a_stub
+_run test_provider_402_and_missing_curl_still_defer
+_run test_rounds_used_counts_rounds_that_dispatched
+_run test_changelog
+_run test_changelog_multi_source
+_run test_changelog_refuses_foreign_cache_dir
+_run test_changelog_single_remote_suppresses_defaults
+_run test_changelog_dedupe_is_scoped_to_the_release
+_run test_changelog_survives_a_force_pushed_remote
+_run test_prune_helper
+_run test_autodream_now_from_a_checkout_uses_the_default_install
+_run test_self_session_excluded
+_run test_skip_empty_sessions
+_run test_skip_empty_disabled
+_run test_l1_retry
+_run test_idempotency_guard
+_run test_idempotency_guard_needs_a_complete_report
+_run test_run_lock_is_per_date_and_live_holders_win
+_run test_run_lock_is_reclaimed_from_a_dead_holder
+_run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
+_run test_self_audit_stats
+_run test_self_audit_stats_failure_denominator
+_run test_self_audit_stats_precached_disambiguation
+_run test_normalize_project
+_run test_citation_check_resolves
+_run test_citation_check_flags_gated_and_missing
+_run test_citation_counters_in_run_stats
+_run test_citation_check_counts_bare_hashes
+_run test_citation_check_resolves_session_id_tail
+_run test_slim_transcript
+_run test_facet_fields_plumbed
+_run test_noise_gate_trivial
+_run test_noise_gate_short_duration
+_run test_noise_gate_subagent_carveout
+_run test_noise_gate_stats
+_run test_noise_gate_env_override
+_run test_oversized_gate_zero
+_run test_oversized_gate_total
+_run test_oversized_gate_errored
+_run test_stats_sidecar_ok
+_run test_stats_sidecar_missing_counted
+_run test_stats_sidecar_missing_keeps_oversized_count
+_run test_stats_sidecar_malformed_counted
+_run test_stats_sidecar_non_numeric_counted
+_run test_runner_provenance
+_run test_runner_provenance_no_git
+_run test_runner_provenance_through_symlink
+_run test_runner_provenance_relative_symlink
+_run test_runner_provenance_unresolvable_chain
+_run test_oversized_gate_script
+_run test_oversized_gate_script_open
+_run test_oversized_gate_script_empty
+_run test_oversized_gate_script_args
+_run test_notify_count
+_run test_notify_open_command
+_run test_notify_dryrun
+_run test_runner_dirty_ignores_untracked
+_run test_overlap_pair
+_run test_overlap_triple
+_run test_overlap_none
+_run test_overlap_drops_advisor_sidecars
+_run test_overlap_drops_nested_sidecars
+_run test_fanout_stats
+_run test_overlap_not_measured_missing_bin
+_run test_overlap_not_measured_empty_output
+_run test_overlap_not_measured_malformed_output
+_run test_notes_no_surfaces
+_run test_notes_from_notes_file
+_run test_notes_from_vault_inbox
+_run test_notes_vault_expired_dropped
+_run test_notes_vault_archived_after_report
+_run test_notes_vault_not_archived_without_report
+_run test_notes_vault_report_published
+_run test_notes_vault_unreadable_note_stays
+_run test_config_file_sourced
+_run test_config_env_wins_over_config
+_run test_notes_header_only_file_does_not_abort
+_run test_notes_icloud_placeholder_is_counted
+_run test_notes_placeholder_and_real_file_counted_once
+_run test_notes_expiry_uses_report_date
+_run test_focus_tag_reaches_the_report_and_is_consumed
+_run test_focus_tag_is_held_for_its_day
+_run test_focus_tag_day_is_the_local_day
+_run test_focus_tag_not_consumed_without_report
+_run test_focus_tag_pending_set
+_run test_focus_tag_retag_after_consume_is_offered_again
+_run test_focus_tag_forced_rebuild_keeps_its_tags
+_run test_focus_tag_unreadable_file_is_reported
+_run test_focus_tag_unparseable_time_is_dated_by_the_report
+_run test_focus_tag_text_cannot_forge_a_note
+_run test_focus_tag_archive_is_idempotent
+_run test_focus_tag_without_jq_is_reported
+_run test_force_rebuild_failed_l2_does_not_consume
+_run test_unmovable_stale_report_disarms_consuming
+_run test_partial_report_does_not_consume
+_run test_partial_report_keeps_previous
+_run test_partial_report_does_not_block_retry
+_run test_complete_report_retires_partials
+_run test_dead_stdout_does_not_kill_the_run
+_run test_unassembled_dates_are_surfaced
+_run test_unassembled_ignores_a_finished_date
+_run test_pre_marker_report_is_not_abandoned
+_run test_missing_report_still_abandoned_before_epoch
+_run test_no_sessions_stub_carries_marker
+_run test_old_date_reprocess_does_not_consume
+_run test_config_unbound_var_does_not_kill_run
 # ---- Multi-root session scanning (SESSION_ROOTS) + root-probe ----
 
 # A run that scans more than one projects dir: primary + one alt, both holding sessions
@@ -4236,19 +4267,30 @@ test_omp_sessions_run_on_another_adapters_engine(){
   echo "# AUTODREAM_L1_ENGINE_OMP=claude: the claude engine reads omp sessions, and omp never runs"
   local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
   o=$(mk_omp_session "$root" ffff); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
-  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=claude
-  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL=claude-test-model run_dream_omp "$root"
-  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP
+  # An omp pin is set too, and must not follow the omp sessions onto the claude CLI.
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=claude AUTODREAM_L1_MODEL_CLAUDE=claude-test-model
+  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL=deepseek/deepseek-flash run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP AUTODREAM_L1_MODEL_CLAUDE
   fd=$(fdir "$root")
   assert_grep    "$fd/sessions-source.txt" "^$h	omp$" "the session is still the omp adapter's"
   assert_grep    "$root/cap/l1-read-$h.txt" 'LIVE_BRANCH_MARKER' "the omp adapter still linearized it"
-  assert_grep    "$root/cap/l1-args-$h.txt" '^claude-test-model$' "the worker ran the configured model"
+  assert_grep    "$root/cap/l1-args-$h.txt" '^claude-test-model$' "the worker ran the claude engine's pinned model"
+  assert_nogrep  "$root/cap/l1-args-$h.txt" 'deepseek' "not the omp pin: a model id belongs to the engine, not the source"
   assert_grep    "$root/cap/l1-args-$h.txt" '^--no-session-persistence$' "with the claude engine's flags"
   assert_nogrep  "$root/cap/l1-args-$h.txt" '^--allow-home$' "and not the omp engine's"
   assert_nogrep  "$fd/$h.json" '"error"' "the session was triaged"
   assert_grep    "$fd/run-stats.txt" '^l1_engine_omp: claude$' "run-stats names the engine"
   assert_grep    "$root/run.out" 'L1 model for omp: claude-test-model (on the claude engine)' "and so does the log"
   assert_no_file "$root/omp-calls.log" "the omp binary was never called"
+  rm -rf "$root"
+  echo "# the other way round: claude sessions on the omp engine take the omp pin, never a claude one"
+  local c hc; root=$(setup_env); mk_session "$root" sess1; c="$root/projects/proj-a/sess1.jsonl"; hc=$(hash_of "$c")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_CLAUDE=omp AUTODREAM_L1_MODEL_CLAUDE=claude-test-model
+  TEST_OMP_L1_MODEL=omp/pinned run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_CLAUDE AUTODREAM_L1_MODEL_CLAUDE
+  assert_grep    "$root/cap/l1-args-$hc.txt" '^omp/pinned$' "the omp engine ran its own pin for the claude session"
+  assert_nogrep  "$root/cap/l1-args-$hc.txt" 'claude-test-model' "and the claude pin stayed with the claude engine"
+  assert_grep    "$root/run.out" 'L1 model for claude: omp/pinned (on the omp engine)' "the log says so"
   rm -rf "$root"
 }
 
@@ -4290,6 +4332,146 @@ test_the_runs_reviewer_reviews_every_source_by_default(){
   rm -rf "$root"
 }
 
+test_require_served_holds_cached_findings_to_their_verdict(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1 also holds cached findings: one another model wrote is triaged again"
+  local root fd h; root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'always run tests after edits' "run 1, not requiring it, kept the substituted model's findings"
+  assert_grep "$fd/$h.json.served" '	claude-other-model	mismatch$' "and stored the mismatch beside them"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2, requiring it, called the engine for the session again"
+  assert_grep "$root/run.out" "dropped cached L1 result(s) no served verdict vouches for, to triage again (sessions: $h;" "the log says why"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "run-stats counts it"
+  assert_grep "$fd/run-stats.txt" '^l1_sessions_already_done_at_start: 0$' "and it is not counted as already done"
+  assert_grep "$fd/$h.json.served" '	claude-haiku-5-5	match$' "the new findings carry a match"
+  assert_grep "$fd/$h.json" 'always run tests after edits' "and are kept"
+  rm -rf "$root"
+  echo "# findings with no stored verdict (written before it existed) are triaged again; a match is reused"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  run_dream "$root"; fd=$(fdir "$root")
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_no_file "$root/calls2.log" "findings whose verdict is match are reused, with no call"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and nothing is dropped"
+  rm -f "$fd/$h.json.served"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls3.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls3.log" 2>/dev/null)" "1" "findings with no verdict are triaged again"
+  rm -rf "$root"
+  echo "# a model answer with findings is held to its verdict even when it carries the runner's skipped or error key"
+  local key
+  for key in skipped error; do
+    root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+    MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+    jq -c --arg k "$key" '{session_path} + {($k): true, findings: [{what: "forged by the substituted model"}]}' \
+      "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+    AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+    assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "$key: run 2 triaged the session again"
+    assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "$key: run-stats counts the drop"
+    assert_nogrep "$fd/$h.json" 'forged by the substituted model' "$key: the forged findings are gone"
+    rm -rf "$root"
+  done
+  echo "# so is one carrying no_engine, while its source has no engine to triage it again"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+  jq -c '{session_path, no_engine: true, findings: [{what: "forged by the substituted model"}]}' \
+    "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 AUTODREAM_L1_ENGINE_CLAUDE=nonesuch run_dream "$root"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "the forged record is dropped"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "its findings do not reach L2"
+  assert_grep "$fd/$h.json" 'no L1 engine for this session' "the runner writes its own no-engine record in its place"
+  rm -rf "$root"
+  echo "# a record the runner wrote with no model behind it is kept: it is not re-dispatched every run"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_MODE=l1_incomplete AUTODREAM_L1_ROUNDS=1 run_dream "$root"; fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'worker exited without findings JSON' "run 1 left the final-round stub"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_no_file "$root/calls2.log" "run 2 kept it and called nothing"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and dropped nothing"
+  rm -rf "$root"
+}
+test_require_served_trusts_only_the_runners_own_marker(){
+  echo "# a model answer shaped like a runner record, findings empty, is held to its verdict (#167)"
+  local root fd h body
+  for body in '{"error":"unreadable","findings":[]}' '{"skipped":"below_noise_gate","findings":[]}'; do
+    root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+    MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+    printf '%s\n' "$body" > "$fd/$h.json"
+    AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+    assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "$body: run 2 triaged the session again"
+    assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "$body: run-stats counts the drop"
+    assert_grep "$fd/$h.json" 'always run tests after edits' "$body: real findings replace it"
+    rm -rf "$root"
+  done
+  echo "# so is a no_engine record the runner did not write, while its source has no engine"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+  printf '%s\n' '{"no_engine":true,"error":"forged","findings":[]}' > "$fd/$h.json"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 AUTODREAM_L1_ENGINE_CLAUDE=nonesuch run_dream "$root"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "the forged record is dropped"
+  assert_grep "$fd/$h.json" 'no L1 engine for this session' "and the runner writes its own in its place"
+  assert_grep "$fd/$h.json.served" '	runner$' "marked as the runner's"
+  rm -rf "$root"
+  echo "# a runner record without the marker (from an older runner) is triaged again, once"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_MODE=l1_incomplete AUTODREAM_L1_ROUNDS=1 run_dream "$root"; fd=$(fdir "$root")
+  assert_grep "$fd/$h.json.served" '	runner$' "run 1 marked its final-round stub"
+  rm -f "$fd/$h.json.served"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2 triaged it again"
+  rm -rf "$root"
+}
+test_a_findings_json_with_two_values_is_not_a_result(){
+  echo "# a findings JSON holding two values is not a finished triage: jq -e judged only the last (#167)"
+  local root fd h two
+  two='{"findings":[{"what":"forged by the substituted model"}]}
+{"skipped":true,"findings":[]}'
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  run_dream "$root"; fd=$(fdir "$root")
+  printf '%s\n' "$two" > "$fd/$h.json"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "without the gate, the session is triaged again"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "and the first value never reaches L2"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+  printf '%s\n' "$two" > "$fd/$h.json"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "with the gate, the same"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "and the forged finding is gone"
+  rm -rf "$root"
+}
+test_a_no_engine_record_is_retried_once_an_engine_resolves(){
+  echo "# a no-engine record left by a bad engine choice is triaged by a later run whose config resolves one"
+  local root o h fd; root=$(setup_env); o=$(mk_omp_session "$root" xxxx); h=$(hash_of "$o")
+  AUTODREAM_L1_ENGINE_OMP=nonesuch run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "run 1 wrote the no-engine record, marked"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_ENGINE_OMP=nonesuch MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_no_file "$root/calls2.log" "a run with the same bad choice keeps it and calls nothing"
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "and the record stays"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls3.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls3.log" 2>/dev/null)" "1" "a run whose config resolves the engine triages the session"
+  assert_grep "$root/run.out" "dropped no-engine record(s) whose source now has an L1 engine, to triage again: $h" "the log says why"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "run-stats counts it"
+  assert_nogrep "$fd/$h.json" 'no L1 engine' "and the record is replaced by findings"
+  rm -rf "$root"
+  echo "# so is one left by an engine that failed AUTODREAM_REQUIRE_LOGIN, once its login passes"
+  root=$(setup_env); o=$(mk_omp_session "$root" yyyy); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=claude,omp AUTODREAM_REQUIRE_LOGIN="provider=firstParty" run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "run 1 handed the omp engine nothing"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2, with no login requirement, triages it"
+  rm -rf "$root"
+  echo "# a no-engine record written before the marker existed is recognised by its error"
+  root=$(setup_env); o=$(mk_omp_session "$root" zzzz); h=$(hash_of "$o")
+  AUTODREAM_L1_ENGINE_OMP=nonesuch run_dream_omp "$root"
+  fd=$(fdir "$root")
+  jq -c 'del(.no_engine)' "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "it is triaged once the engine resolves"
+  rm -rf "$root"
+}
 test_an_unusable_l1_engine_override_fails_closed(){
   echo "# an L1 engine override that names no accepted adapter: no model call at all, not the omp engine"
   local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
@@ -4328,7 +4510,35 @@ test_l1_provenance_and_served_models_are_recorded(){
   assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com$' "and so does run-stats"
   assert_grep "$fd/run-stats.txt" '^l1_served_models: claude-haiku-5-5=2$' "each call is counted under the model that answered it"
   assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "none was answered by another model"
+  assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 0$' "and every call reported its model"
   assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0250$' "and the engine's cost estimates are summed"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_unmeasured: 0$' "with no call left out of the sum"
+  rm -rf "$root"
+  echo "# a model asked for by alias matches the canonical id the CLI answers as (the adapter verdict)"
+  local h; root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  AUTODREAM_L1_MODEL=haiku MOCK_SERVED_MODEL=claude-haiku-5-5 AUTODREAM_L1_REQUIRE_SERVED=1 run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/l1-served.tsv" "^$h	claude	haiku	claude-haiku-5-5	[0-9.]*	match$" "haiku answered as claude-haiku-5-5 is recorded as a match"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "not counted as a mismatch"
+  assert_grep "$fd/$h.json" 'always run tests after edits' "and AUTODREAM_L1_REQUIRE_SERVED=1 keeps its findings"
+  rm -rf "$root"
+  echo "# an engine that reports no model is unmeasured, never a mismatch, and REQUIRE_SERVED cannot vouch for it"
+  local o; root=$(setup_env); o=$(mk_omp_session "$root" vvvv); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/l1-served.tsv" "^$h	omp	omp/test-model	unknown		unmeasured$" "the omp call is recorded with no model and no verdict"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "it is not a mismatch"
+  assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 1$' "it is counted as unmeasured"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0000$' "an all-omp night has no cost to sum"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_unmeasured: 1$' "and says how many calls that leaves out, so 0.0000 never reads as free"
+  rm -rf "$root"
+  root=$(setup_env); o=$(mk_omp_session "$root" wwww); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=omp AUTODREAM_L1_REQUIRE_SERVED=1 run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_nogrep "$fd/$h.json" 'always run tests after edits' "with AUTODREAM_L1_REQUIRE_SERVED=1 its findings are discarded"
+  if grep -qs 'the omp engine did not report which model answered' "$fd/$h.json" "$fd/$h.json.err"; then
+    ok "and the failure says the engine reported no model"
+  else no "and the failure says the engine reported no model"; fi
   rm -rf "$root"
 }
 
@@ -5504,92 +5714,96 @@ test_no_markdown_memory_writer_remains(){
 }
 
 # ---- run the new tests ----
-test_pins_applied_after_complete_report
-test_normalize_project_survives_non_object_findings
-test_nested_session_roots_name_the_inner_bucket
-test_pins_not_applied_after_truncated_report
-test_pins_stale_file_is_moved_aside
-test_pins_tab_in_cwd_never_splits_the_row
-test_pins_failed_authorization_rebuild_stores_nothing
-test_pins_forged_session_path_authorizes_nothing
-test_pins_subagent_sessions_keep_their_project
-test_pins_cwd_outside_its_bucket_authorizes_nothing
-test_pins_colliding_cwds_authorize_nothing
-test_pins_custom_slug_bucket_keeps_its_cwd
-test_pins_invalid_cwd_still_counts_toward_a_collision
-test_pins_unresolvable_cwd_still_counts_toward_a_collision
-test_pins_applied_before_notify
-test_pins_sweep_applies_pins_a_killed_run_never_reached
-test_pins_sweep_retries_failed_pins_on_an_earlier_date
-test_pins_sweep_leaves_what_it_must
-test_pins_sweep_respects_a_live_run_and_a_stale_result
-test_streak_update_runs_before_steps_that_can_hang
-test_pins_ledger_wiped_by_a_worker_stores_nothing_twice
-test_pins_bucket_named_subagents_is_a_project
-test_pins_failed_move_aside_leaves_no_temp_file
-test_pins_l2_cannot_widen_the_worklist
-test_pins_l1_cannot_widen_the_worklist
-test_no_markdown_memory_writer_remains
-test_multiroot_triages_alt_root
-test_multiroot_heldout_and_dedup
-test_multiroot_flags_unindexed
-test_rootprobe_remembers_choice
-test_rootprobe_no_write_mode_flags_but_does_not_write
-test_rootprobe_empty_home
-test_newline_path_is_rejected_not_split
-test_source_sidecar_is_written
-test_artifact_hash_contract_is_unchanged
-test_preflight_stops_a_run_missing_a_dependency
-test_install_deploys_the_adapter_runtime
-test_unusual_session_paths_are_triaged_or_refused
-test_failure_stub_for_a_quoted_path_is_valid_json
-test_failing_enumerator_aborts_the_run
-test_one_failed_root_does_not_kill_the_night
-test_enabled_adapters_resolves_once
-test_l2_gets_the_skills_inventory_and_per_source_facts
-test_unavailable_skills_inventory_says_so
-test_harness_addendum_reaches_only_that_harnesss_workers
-test_l2_is_read_only_and_the_runner_writes_the_report
-test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
-test_pin_block_must_follow_the_sentinel_and_be_closed
-test_dream_triage_is_opt_in_and_leaves_l2_alone
-test_l2_engine_comes_from_an_adapter
-test_config_written_by_install_enables_adapters_and_l2_engine
-test_replay_harness_works_on_synthetic_data
-test_skill_fields_dropped_without_a_sidecar
-test_skill_fields_dropped_with_a_partial_sidecar
-test_skill_fields_are_enforced_from_the_sidecar
-test_builtin_slash_commands_are_not_skill_invocations
-test_omp_adapter_is_opt_in
-test_l1_precheck_probes_the_l1_provider
-test_worker_failure_probe_names_the_l1_provider
-test_one_dead_provider_does_not_hold_back_the_others
-test_omp_session_is_linearized_for_the_worker
-test_omp_sessions_run_on_another_adapters_engine
-test_the_runs_reviewer_reviews_every_source_by_default
-test_an_unusable_l1_engine_override_fails_closed
-test_omp_session_roots_come_from_the_host_setting
-test_l1_provenance_and_served_models_are_recorded
-test_an_engine_failing_its_login_requirement_is_handed_nothing
-test_a_call_answered_by_another_model_loses_its_findings
-test_omp_nested_child_is_a_sidechain_of_its_bucket
-test_omp_session_that_cannot_be_linearized_is_an_error_record
-test_omp_stats_describe_the_live_branch_only
-test_no_usable_adapter_leaves_a_trace
-test_fatal_does_not_clobber_a_complete_date
-test_partial_enumeration_keeps_what_it_read
-test_all_roots_unavailable_fails
-test_fresh_host_with_no_store_is_not_a_failure
-test_upgrade_lag_install_still_produces_a_report
-test_forced_hash_collision_drops_both
-test_collision_worklist_failure_aborts
-test_collision_membership_probe_failure_aborts
-test_three_way_collision_counts_paths_not_lines
-test_mixed_collision_run_attributes_correctly
-test_persistent_sidecar_failure_counts_rows_not_attempts
-test_unwritable_collision_index_fails_closed
-test_broken_shasum_never_collapses_sessions
-test_all_excluded_corpus_says_so
+_run test_pins_applied_after_complete_report
+_run test_normalize_project_survives_non_object_findings
+_run test_nested_session_roots_name_the_inner_bucket
+_run test_pins_not_applied_after_truncated_report
+_run test_pins_stale_file_is_moved_aside
+_run test_pins_tab_in_cwd_never_splits_the_row
+_run test_pins_failed_authorization_rebuild_stores_nothing
+_run test_pins_forged_session_path_authorizes_nothing
+_run test_pins_subagent_sessions_keep_their_project
+_run test_pins_cwd_outside_its_bucket_authorizes_nothing
+_run test_pins_colliding_cwds_authorize_nothing
+_run test_pins_custom_slug_bucket_keeps_its_cwd
+_run test_pins_invalid_cwd_still_counts_toward_a_collision
+_run test_pins_unresolvable_cwd_still_counts_toward_a_collision
+_run test_pins_applied_before_notify
+_run test_pins_sweep_applies_pins_a_killed_run_never_reached
+_run test_pins_sweep_retries_failed_pins_on_an_earlier_date
+_run test_pins_sweep_leaves_what_it_must
+_run test_pins_sweep_respects_a_live_run_and_a_stale_result
+_run test_streak_update_runs_before_steps_that_can_hang
+_run test_pins_ledger_wiped_by_a_worker_stores_nothing_twice
+_run test_pins_bucket_named_subagents_is_a_project
+_run test_pins_failed_move_aside_leaves_no_temp_file
+_run test_pins_l2_cannot_widen_the_worklist
+_run test_pins_l1_cannot_widen_the_worklist
+_run test_no_markdown_memory_writer_remains
+_run test_multiroot_triages_alt_root
+_run test_multiroot_heldout_and_dedup
+_run test_multiroot_flags_unindexed
+_run test_rootprobe_remembers_choice
+_run test_rootprobe_no_write_mode_flags_but_does_not_write
+_run test_rootprobe_empty_home
+_run test_newline_path_is_rejected_not_split
+_run test_source_sidecar_is_written
+_run test_artifact_hash_contract_is_unchanged
+_run test_preflight_stops_a_run_missing_a_dependency
+_run test_install_deploys_the_adapter_runtime
+_run test_unusual_session_paths_are_triaged_or_refused
+_run test_failure_stub_for_a_quoted_path_is_valid_json
+_run test_failing_enumerator_aborts_the_run
+_run test_one_failed_root_does_not_kill_the_night
+_run test_enabled_adapters_resolves_once
+_run test_l2_gets_the_skills_inventory_and_per_source_facts
+_run test_unavailable_skills_inventory_says_so
+_run test_harness_addendum_reaches_only_that_harnesss_workers
+_run test_l2_is_read_only_and_the_runner_writes_the_report
+_run test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
+_run test_pin_block_must_follow_the_sentinel_and_be_closed
+_run test_dream_triage_is_opt_in_and_leaves_l2_alone
+_run test_l2_engine_comes_from_an_adapter
+_run test_config_written_by_install_enables_adapters_and_l2_engine
+_run test_replay_harness_works_on_synthetic_data
+_run test_skill_fields_dropped_without_a_sidecar
+_run test_skill_fields_dropped_with_a_partial_sidecar
+_run test_skill_fields_are_enforced_from_the_sidecar
+_run test_builtin_slash_commands_are_not_skill_invocations
+_run test_omp_adapter_is_opt_in
+_run test_l1_precheck_probes_the_l1_provider
+_run test_worker_failure_probe_names_the_l1_provider
+_run test_one_dead_provider_does_not_hold_back_the_others
+_run test_omp_session_is_linearized_for_the_worker
+_run test_omp_sessions_run_on_another_adapters_engine
+_run test_the_runs_reviewer_reviews_every_source_by_default
+_run test_an_unusable_l1_engine_override_fails_closed
+_run test_a_no_engine_record_is_retried_once_an_engine_resolves
+_run test_omp_session_roots_come_from_the_host_setting
+_run test_l1_provenance_and_served_models_are_recorded
+_run test_an_engine_failing_its_login_requirement_is_handed_nothing
+_run test_a_call_answered_by_another_model_loses_its_findings
+_run test_require_served_holds_cached_findings_to_their_verdict
+_run test_require_served_trusts_only_the_runners_own_marker
+_run test_a_findings_json_with_two_values_is_not_a_result
+_run test_omp_nested_child_is_a_sidechain_of_its_bucket
+_run test_omp_session_that_cannot_be_linearized_is_an_error_record
+_run test_omp_stats_describe_the_live_branch_only
+_run test_no_usable_adapter_leaves_a_trace
+_run test_fatal_does_not_clobber_a_complete_date
+_run test_partial_enumeration_keeps_what_it_read
+_run test_all_roots_unavailable_fails
+_run test_fresh_host_with_no_store_is_not_a_failure
+_run test_upgrade_lag_install_still_produces_a_report
+_run test_forced_hash_collision_drops_both
+_run test_collision_worklist_failure_aborts
+_run test_collision_membership_probe_failure_aborts
+_run test_three_way_collision_counts_paths_not_lines
+_run test_mixed_collision_run_attributes_correctly
+_run test_persistent_sidecar_failure_counts_rows_not_attempts
+_run test_unwritable_collision_index_fails_closed
+_run test_broken_shasum_never_collapses_sessions
+_run test_all_excluded_corpus_says_so
 
 # ---- Report-day window: a session is placed by what is IN it, not by its file mtime -----
 # Issue #113. Enumeration used to be `-newermt DAY ! -newermt NEXT`, so a session written to
@@ -5974,20 +6188,20 @@ test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused(
   rm -rf "$root"
 }
 
-test_window_places_a_session_by_its_records_not_its_mtime
-test_window_cuts_a_multi_day_session_to_the_report_day
-test_window_off_restores_mtime_enumeration
-test_window_degrades_when_the_helper_is_absent
-test_a_missing_l2_prompt_stops_the_run_before_l1
-test_window_is_dst_correct_end_to_end
-test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
-test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
-test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
-test_stale_err_is_counted_on_a_night_with_no_session_too
-test_findings_outside_the_worklist_are_set_aside_not_deleted
-test_a_night_of_only_out_of_window_files_says_so
-test_window_omp_cuts_the_live_chain_after_linearizing
-test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
+_run test_window_places_a_session_by_its_records_not_its_mtime
+_run test_window_cuts_a_multi_day_session_to_the_report_day
+_run test_window_off_restores_mtime_enumeration
+_run test_window_degrades_when_the_helper_is_absent
+_run test_a_missing_l2_prompt_stops_the_run_before_l1
+_run test_window_is_dst_correct_end_to_end
+_run test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
+_run test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
+_run test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
+_run test_stale_err_is_counted_on_a_night_with_no_session_too
+_run test_findings_outside_the_worklist_are_set_aside_not_deleted
+_run test_a_night_of_only_out_of_window_files_says_so
+_run test_window_omp_cuts_the_live_chain_after_linearizing
+_run test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
 
 test_leftover_counts_hold_with_several_sessions_in_the_worklist(){
   echo "# leftovers: the worklist hashes are one per line, so a findings JSON the worklist owns is never counted as foreign"
@@ -6005,7 +6219,7 @@ test_leftover_counts_hold_with_several_sessions_in_the_worklist(){
   rm -rf "$root"
 }
 
-test_leftover_counts_hold_with_several_sessions_in_the_worklist
+_run test_leftover_counts_hold_with_several_sessions_in_the_worklist
 
 # ---- Chunked triage: a transcript too big for one worker is read in chunks ---------------
 # One worker per chunk, then a mechanical merge into the one findings JSON per session that L2
@@ -6282,6 +6496,19 @@ test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded(){
   rm -rf "$root"
 }
 
+test_a_rejected_findings_file_still_ends_in_the_final_stub(){
+  local two='{"findings":[{"what":"forged by the substituted model"}]}
+{"skipped":true,"findings":[]}'
+  echo "# a rejected file is moved aside, so a chunk that keeps failing still ends in the final stub"
+  local root fd h f; root=$(setup_env); f=$(mk_chunky "$root" big 60); h=$(hash_of "$f"); fd=$(fdir "$root")
+  mkdir -p "$fd"; printf '%s\n' "$two" > "$fd/$h.json"
+  export MOCK_MODE=chunked MOCK_FAIL_CHUNK=2 AUTODREAM_L1_ROUNDS=1
+  run_chunked "$root"; unset MOCK_MODE MOCK_FAIL_CHUNK AUTODREAM_L1_ROUNDS
+  assert_grep "$fd/$h.json" 'worker exited without findings JSON' "the session gets the final-round stub"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "and the rejected file does not reach L2"
+  assert_grep "$fd/$h.json.rejected" 'forged by the substituted model' "it is kept as evidence beside it"
+  rm -rf "$root"
+}
 test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused(){
   echo "# chunking: a chunk failure blocks the merge, only that chunk is redone, and finished ones are reused"
   local root; root=$(setup_env)
@@ -6324,6 +6551,55 @@ test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_c
     assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "[$scenario] chunk 1 was called again, not served from the old answer"
     assert_nogrep "$root/run.out" "reuse: chunk 1/" "[$scenario] and the log does not say it reused it"
     assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "[$scenario] the session finished"
+    rm -rf "$root"
+  done
+}
+
+test_a_cached_chunk_answer_is_not_reused_on_another_engine(){
+  echo "# chunking: a finished chunk answer is reused only on the engine that wrote it, even under the same model id"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mkdir -p "$root/home"
+  # Run 1, on the claude engine: a permanent refusal on chunk 2 defers the date and leaves chunk 1.
+  export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls1.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1 AUTODREAM_L1_MODEL=shared/model
+  run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+  assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "run 1 on the claude engine left chunk 1's answer behind"
+  # Run 2: the same model id, the same prompt and stats, but the session moves to the omp engine.
+  # A subshell, so the sandbox HOME (the omp adapter enumerates ~/.omp) cannot outlive the run.
+  ( export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1 HOME="$root/home" \
+      AUTODREAM_ADAPTERS=claude,omp OMP_BIN="$MOCK" AUTODREAM_L1_ENGINE_CLAUDE=omp
+    run_chunked "$root" )
+  unset AUTODREAM_L1_MODEL
+  assert_grep "$fd/run-stats.txt" '^l1_engine_claude: omp$' "run 2 put the session on the omp engine"
+  assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "chunk 1 was called again on the new engine, not served from the old answer"
+  assert_nogrep "$root/run.out" "reuse: chunk 1/" "and the log does not say it reused it"
+  assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "the session finished"
+  rm -rf "$root"
+}
+
+test_require_served_holds_cached_chunk_answers_to_their_verdict(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1 also holds cached chunk answers: one another model wrote is redone"
+  local scenario
+  for scenario in substituted matched; do
+    local root; root=$(setup_env)
+    local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+    # Run 1, not requiring it: a permanent refusal on chunk 2 defers the date and leaves chunk 1's answer.
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls1.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1
+    [ "$scenario" = substituted ] && export MOCK_SERVED_MODEL=claude-other-model
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS MOCK_SERVED_MODEL
+    assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "[$scenario] run 1 left chunk 1's answer behind"
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1 AUTODREAM_L1_REQUIRE_SERVED=1
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG AUTODREAM_L1_ROUNDS AUTODREAM_L1_REQUIRE_SERVED
+    if [ "$scenario" = substituted ]; then
+      assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "[$scenario] chunk 1 was called again, not reused"
+      assert_nogrep "$root/run.out" "reuse: chunk 1/" "[$scenario] and the log does not say it reused it"
+      assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "[$scenario] run-stats counts the dropped answer"
+    else
+      assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "0" "[$scenario] chunk 1 was reused"
+      assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "[$scenario] and nothing was dropped"
+    fi
+    assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "[$scenario] the session finished"
+    assert_grep "$fd/$h.json.served" '	match$' "[$scenario] and the merged findings carry a match"
     rm -rf "$root"
   done
 }
@@ -6487,7 +6763,11 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain(){
   assert_nogrep "$fd/$h.json" 'could not be normalized' "it was not refused by the linearizer"
   assert_eq "$(chunk_reads "$root" | xargs cat | grep -c 'DAY1_ENTRY\|DAY3_ENTRY')" "0" "no chunk holds an entry from another day"
   assert_eq "$(turn_stats "$root")" "40/1" "the 40 turns of the day are in exactly one chunk each"
-  assert_eq "$(head -n 1 "$(chunk_reads "$root" | sort | head -1)" | jq -r .type)" "autodream_meta" "the first chunk opens with the session header"
+  # The prefix, not the parsed line: the header embeds the session's absolute path and is cut at the
+  # slimmer's 400-character line cap. It is 391 characters under a 9-character TMPDIR, so a TMPDIR
+  # 9 characters longer (a Mac's default, or one shard's nested temp dir) cut it mid-JSON, and jq on
+  # the cut line printed nothing.
+  assert_eq "$(head -n 1 "$(chunk_reads "$root" | sort | head -1)" | cut -c1-24)" '{"type":"autodream_meta"' "the first chunk opens with the session header"
   assert_eq "$(jq -r .meta.chunks "$fd/$h.json")" "$n" "the merged findings record the chunk count"
   assert_eq "$(jq -r .session_path "$fd/$h.json")" "$o" "and name the real session"
   assert_grep "$fd/sessions-source.txt" "^$h	omp$" "it is an omp session"
@@ -6495,26 +6775,29 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain(){
   rm -rf "$root"
 }
 
-test_chunking_reads_the_whole_conversation_in_chunks
-test_chunking_leaves_a_transcript_that_fits_alone
-test_chunk_cap_drops_the_middle_and_counts_it
-test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript
-test_chunking_off_is_the_old_behaviour
-test_chunking_is_off_when_the_knob_is_unset
-test_chunk_knobs_are_validated
-test_noise_gate_knobs_are_validated
-test_chunking_degrades_when_the_helpers_are_absent
-test_a_failed_chunker_never_hands_a_worker_the_whole_slim
-test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
-test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
-test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
-test_a_bad_chunk_answer_is_never_merged_around
-test_a_chunk_failure_is_classified_like_any_worker_failure
-test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
-test_chunk_files_are_never_mistaken_for_findings
-test_the_circuit_breaker_counts_finished_chunks_as_progress
-test_chunk_inputs_are_private_and_removed
-test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
+_run test_chunking_reads_the_whole_conversation_in_chunks
+_run test_chunking_leaves_a_transcript_that_fits_alone
+_run test_chunk_cap_drops_the_middle_and_counts_it
+_run test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript
+_run test_chunking_off_is_the_old_behaviour
+_run test_chunking_is_off_when_the_knob_is_unset
+_run test_chunk_knobs_are_validated
+_run test_noise_gate_knobs_are_validated
+_run test_chunking_degrades_when_the_helpers_are_absent
+_run test_a_failed_chunker_never_hands_a_worker_the_whole_slim
+_run test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
+_run test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
+_run test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
+_run test_a_cached_chunk_answer_is_not_reused_on_another_engine
+_run test_require_served_holds_cached_chunk_answers_to_their_verdict
+_run test_a_rejected_findings_file_still_ends_in_the_final_stub
+_run test_a_bad_chunk_answer_is_never_merged_around
+_run test_a_chunk_failure_is_classified_like_any_worker_failure
+_run test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
+_run test_chunk_files_are_never_mistaken_for_findings
+_run test_the_circuit_breaker_counts_finished_chunks_as_progress
+_run test_chunk_inputs_are_private_and_removed
+_run test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
 
 # ---- The unit suites, run here and not only in CI ---------------------------
 # CLAUDE.md tells contributors "run tests/run-all.sh after any run.sh/prompt
@@ -6522,15 +6805,21 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
 # run skipped adapter containment, the manifest-name check and the entire
 # contract suite, which is the gap the CI step's own comment says it closes.
 # Their counts fold into the totals below, so a red unit suite fails this script.
-echo
-echo "===== unit suites ====="
+if [ -z "$_list" ]; then
+  echo
+  echo "===== unit suites ====="
+fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt"
+_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt shard"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
+  _owns || continue
+  if [ -n "$_list" ]; then printf 'suite:%s\n' "$_suite"; continue; fi
+  _t0=$SECONDS
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
+  _timed "suite:$_suite" "$_t0"
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
   _f=$(printf '%s\n' "$_out" | sed -n 's/.*failed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
   pass=$((pass + ${_p:-0}))
@@ -6597,16 +6886,21 @@ test_question_streaks_state_lives_with_the_install(){
   # the cleared streak back when it writes.
   printf 'k\t1\t2026-03-03\t2026-03-03\tHeld?\n' > "$st"
   mkdir "$st.lock"
-  AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
+  # AUTODREAM_QUESTION_LOCK_WAIT=1: the default is 15 one-second tries, and this case and the next
+  # each held a lock on purpose for all of them (32 of the suite's seconds, one test in 46).
+  local t0=$SECONDS
+  AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
+  local waited=$((SECONDS - t0))
   rmdir "$st.lock" 2>/dev/null
   assert_eq "$rc" "1" "clear fails while an update holds the lock"
+  [ "$waited" -le 6 ] && ok "and gives up after the configured wait, not the default 15 tries (${waited}s)" || no "and gives up after the configured wait, not the default 15 tries (took ${waited}s)"
   assert_eq "$(streak_rows "$st")" "1" "and leaves the state for that update"
 
   # An EMPTY board is not a reason to skip the lock: an update holding it may be about to
   # write the first streak, which clear would then report as cleared (Codex review of 4eea84d).
   : > "$st"
   mkdir "$st.lock"
-  AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
+  AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
   rmdir "$st.lock" 2>/dev/null
   assert_eq "$rc" "1" "clear on an empty board still waits for the lock and fails while it is held"
 
@@ -6816,9 +7110,9 @@ test_question_streaks_reruns_and_mismatch(){
   rm -rf "$root"
 }
 
-test_question_streaks
-test_question_streaks_reruns_and_mismatch
-test_question_streaks_state_lives_with_the_install
+_run test_question_streaks
+_run test_question_streaks_reruns_and_mismatch
+_run test_question_streaks_state_lives_with_the_install
 
 # ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
 # Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
@@ -6954,13 +7248,14 @@ test_prune_worktrees_wiring(){
   rm -rf "$root" "$keep"
 }
 
-test_prune_worktrees_wiring
-test_l2_diag_written_on_exit_143
-test_l2_diag_written_on_exit_137
-test_l2_diag_long_command_lines_keep_the_sections_intact
-test_l2_diag_absent_on_other_outcomes
-test_l2_diag_probes_never_fail_or_stall_the_run
+_run test_prune_worktrees_wiring
+_run test_l2_diag_written_on_exit_143
+_run test_l2_diag_written_on_exit_137
+_run test_l2_diag_long_command_lines_keep_the_sections_intact
+_run test_l2_diag_absent_on_other_outcomes
+_run test_l2_diag_probes_never_fail_or_stall_the_run
 
+[ -z "$_list" ] || exit 0
 echo
 echo "----------------------------------------"
 echo "passed: $pass   failed: $fail"

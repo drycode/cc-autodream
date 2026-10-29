@@ -64,6 +64,14 @@ printf '%s' "${MOCK_CODE:-200}"
 exit 0
 SH
   chmod +x "$1/curl"
+  # Fake sleep: the script paces its pages with a real `sleep 2`, which made every collect in this
+  # suite wait. Record the request instead (MOCK_SLEEP_LOG) so a test can still say what was asked.
+  cat > "$1/sleep" <<'SH'
+#!/bin/bash
+[ -n "${MOCK_SLEEP_LOG:-}" ] && printf '%s\n' "$*" >> "$MOCK_SLEEP_LOG"
+exit 0
+SH
+  chmod +x "$1/sleep"
 }
 
 # Fresh sandbox with credentials and a pre-seeded queryId so detection is skipped.
@@ -84,11 +92,25 @@ run_bm(){ # $1=root, rest = args ; MOCK_CODE/MOCK_BODY/X_CREDS_FILE inherited
   PATH="$root/bin:$PATH" \
   AUTODREAM_DIR="$root" AUTODREAM_CONFIG="$root/no-such-config" \
   X_CREDS_FILE="${X_CREDS_FILE:-$root/creds}" X_STATE_DIR="$root/state" \
-  X_MAX_PAGES=1 MOCK_BODY="${MOCK_BODY:-$root/page.json}" \
+  X_MAX_PAGES="${X_MAX_PAGES:-1}" MOCK_BODY="${MOCK_BODY:-$root/page.json}" MOCK_SLEEP_LOG="${MOCK_SLEEP_LOG:-}" \
   bash "$BIN" "$@" > "$root/out.txt" 2>&1
 }
 
 # ---------------------------------------------------------------------------
+
+test_pages_are_paced_and_the_last_one_is_not_waited_on(){
+  echo "# pacing: two seconds between pages, and no wait after the last page the run will fetch"
+  local root; root=$(setup)
+  : > "$root/sleeps"
+  X_MAX_PAGES=1 MOCK_SLEEP_LOG="$root/sleeps" run_bm "$root" collect "$root/findings"
+  assert_eq "$(wc -l < "$root/sleeps" | tr -d ' ')" "0" "a one-page run never sleeps: nothing follows the page"
+  rm -rf "$root"
+  root=$(setup)
+  : > "$root/sleeps"
+  X_MAX_PAGES=2 MOCK_SLEEP_LOG="$root/sleeps" run_bm "$root" collect "$root/findings"
+  assert_eq "$(cat "$root/sleeps")" "2" "a two-page run waits once, two seconds, between the pages"
+  rm -rf "$root"
+}
 
 test_not_configured(){
   echo "# no credentials -> a not-configured stub, an empty manifest, exit 0"
@@ -383,6 +405,7 @@ test_walk_reaches_every_suffix_variant(){
 }
 
 echo "x-bookmarks.sh tests"
+test_pages_are_paced_and_the_last_one_is_not_waited_on
 test_not_configured
 test_auth_failure
 test_stale_queryid_clears_cache

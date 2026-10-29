@@ -157,6 +157,10 @@ Anything ambiguous that needs a human call before being acted on. Group by topic
 
 An open question that would take the user ten seconds to answer with "that already exists" or "we settled this last week" is a triage failure, not a question.
 
+**Wrap this whole section — heading, questions, and the count marker — in two sentinel lines, exactly as written:**
+
+`AUTODREAM_QUESTIONS_BEGIN` on the line before the `## Open questions for the user` heading, and `AUTODREAM_QUESTIONS_END` on the line after the count marker. Both are literal lines, nothing else on them, no indent, no backticks. Four consumers (`notify.sh`, `review.sh`, `question-streaks.sh`, `triage-dream.sh`) read this section and they read it by those two lines; a markdown heading is not enough, because it can appear in a code example or inside a longer heading and every consumer then disagrees about where the section stops. A report whose block is missing or unclosed is treated as truncated by `run.sh` and rebuilt.
+
 **End this section with a count marker on its own line — required, even when the count is zero:**
 
 `<!-- autodream:open-questions=N -->`

@@ -158,7 +158,7 @@ rm -f "$(_adapter_reject_broken_marker)"
 
 # shellcheck disable=SC2086
 rm -rf $TMPROOTS
-echo "# adapter_l1_model: per-adapter override, then the generic one, then the manifest default"
+echo "# adapter_l1_model: per-engine override, then the generic one, then the engine's manifest default"
 l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
 (
   export ADAPTERS_ROOT="$REPO/adapters"
@@ -185,7 +185,9 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
   AUTODREAM_L1_ENGINE_OMP=claude
   assert_eq "$(adapter_l1_engine omp)" "claude" "the per-source engine choice moves it"
   assert_eq "$(adapter_l1_model omp)" "claude-haiku-5-5" "and its default model is the engine's, not its own"
-  assert_eq "$(AUTODREAM_L1_MODEL_OMP=claude-x adapter_l1_model omp)" "claude-x" "an explicit model still wins"
+  assert_eq "$(AUTODREAM_L1_MODEL_CLAUDE=claude-x adapter_l1_model omp)" "claude-x" "a pin on the engine reaches the sessions it reads"
+  assert_eq "$(AUTODREAM_L1_MODEL_OMP=deepseek/deepseek-flash adapter_l1_model omp)" "claude-haiku-5-5" "a pin on the source does not: its model id belongs to another engine"
+  assert_eq "$(AUTODREAM_L1_MODEL_CLAUDE=claude-x AUTODREAM_L1_MODEL_OMP=omp/x adapter_l1_model claude omp)" "omp/x" "the other way round: claude sessions the omp engine reads take the omp pin"
   AUTODREAM_L1_ENGINE_OMP=nonesuch
   adapter_l1_engine omp >/dev/null 2>&1; assert_eq "$?" "1" "an override naming no accepted adapter resolves nothing"
   adapter_l1_model omp >/dev/null 2>&1; assert_eq "$?" "1" "and leaves no default model to fall back on"

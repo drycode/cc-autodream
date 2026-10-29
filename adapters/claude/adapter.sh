@@ -211,13 +211,26 @@ case "$cmd" in
       --system-prompt 'Reply with the single word ok and exit.'
     ;;
 
-  served) # $1=stdout of one L1 call -> "<model>[,<model>...]<TAB><estimated cost USD>", exit 1 without a result
+  served) # $1=stdout of one L1 call $2=the model it asked for
+          # -> "<model>[,<model>...]<TAB><estimated cost USD><TAB><match|mismatch>", exit 1 without a result
     # The models come from the result object's modelUsage, which lists every model that answered
     # any part of the call. The cost is the CLI's estimate at API prices, not what a subscription
     # bills; it is kept because it compares models on real numbers.
+    # The verdict is match when every model that answered is the one asked for, judged here because
+    # only this adapter knows the CLI's naming: modelUsage carries canonical ids (claude-haiku-5-5)
+    # while a host may ask by alias (haiku). A bare family name matches any id of that family
+    # (claude-<name>-...), a full id only itself, and a context suffix such as [1m] is ignored on
+    # both sides. An alias the family rule cannot read (default, opusplan) is a mismatch: the
+    # runner then cannot vouch for the model, which is what AUTODREAM_L1_REQUIRE_SERVED asks.
     [ "$#" -ge 1 ] && [ -r "$1" ] || exit 1
-    line=$(jq -r 'select(type == "object" and .type == "result")
-      | [((.modelUsage // {}) | keys | sort | join(",")), ((.total_cost_usd // "") | tostring)] | @tsv' "$1" 2>/dev/null | head -1)
+    line=$(jq -r --arg want "${2:-}" 'select(type == "object" and .type == "result")
+      | ((.modelUsage // {}) | keys | sort) as $m
+      | ($want | sub("\\[[^\\]]*\\]$"; "")) as $w
+      | [($m | join(",")), ((.total_cost_usd // "") | tostring),
+         (if ($m | length) > 0 and all($m[]; sub("\\[[^\\]]*\\]$"; "") as $s
+                | $s == $w or (($w | test("^[a-z]+$")) and ($s | startswith("claude-" + $w + "-"))))
+          then "match" else "mismatch" end)]
+      | @tsv' "$1" 2>/dev/null | head -1)
     case "$line" in ""|$'\t'*) exit 1 ;; esac
     printf '%s\n' "$line"
     ;;

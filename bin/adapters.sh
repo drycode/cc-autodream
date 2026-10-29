@@ -219,24 +219,24 @@ adapter_l1_engine() { # $1=source $2=the run's reviewer -> engine adapter on std
   printf '%s' "$v"
 }
 
-# The model one adapter's L1 workers run, resolved in a fixed order so a host can pin one
-# harness without touching another:
-#   AUTODREAM_L1_MODEL_<NAME>   that adapter only (the name upper-cased, dashes to underscores)
-#   AUTODREAM_L1_MODEL          every adapter
-#   the manifest's l1_model     the default of the adapter whose engine runs it (adapter_l1_engine)
-# A model id belongs to one engine (neuralwatt/glm-5.3-flash means nothing to claude), which
-# is why the per-adapter form exists: the generic one is an override for hosts with one engine.
+# The model one source's L1 calls run. A model id belongs to one engine (neuralwatt/glm-5.3-flash
+# means nothing to claude), so the engine is resolved first (adapter_l1_engine) and the model is
+# keyed by it, never by the source, in a fixed order so a host can pin one engine without touching
+# another:
+#   AUTODREAM_L1_MODEL_<ENGINE>   that engine only, whichever source's sessions it reads (the name
+#                                 upper-cased, dashes to underscores), like AUTODREAM_L2_MODEL_<NAME>
+#   AUTODREAM_L1_MODEL            every engine: an override for hosts with one engine
+#   the manifest's l1_model       that engine's default
+# With the reviewer on claude, AUTODREAM_L1_MODEL_OMP therefore does not reach omp sessions, and
+# an omp model id never reaches the claude CLI.
 adapter_l1_model() { # $1=source $2=the run's reviewer -> model on stdout, exit 1 when none resolves
-  local name="$1" up var v engine
-  _adapter_name_safe "$name" || return 1
-  up=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')
+  local engine up var v
+  engine=$(adapter_l1_engine "$1" "${2:-}") || return 1
+  up=$(printf '%s' "$engine" | tr 'a-z-' 'A-Z_')
   var="AUTODREAM_L1_MODEL_$up"
   v="${!var:-}"
   [ -n "$v" ] || v="${AUTODREAM_L1_MODEL:-}"
-  if [ -z "$v" ]; then
-    engine=$(adapter_l1_engine "$name" "${2:-}") || return 1
-    v=$(adapter_manifest_get "$engine" '.l1_model' 2>/dev/null) || v=""
-  fi
+  [ -n "$v" ] || v=$(adapter_manifest_get "$engine" '.l1_model' 2>/dev/null) || v=""
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }

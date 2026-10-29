@@ -361,21 +361,73 @@ fi
 
 REPORT_BYTES=$(wc -c < "$REPORT" | tr -d ' ')
 
+# Triage needs the questions, not the report. Last night's findings can run to
+# 25KB of session narrative, and a body that reads like exploit development
+# (a night spent on TV firmware, sdb, root status, dlopen) makes the session
+# read as an offensive-security engagement to model providers' content
+# classifiers: on 2026-10-27 every launch of this script with the whole report
+# inlined was refused with "Opus 5.5's safeguards flagged this session ...
+# [cyber]", including a bare "go". The same report's open-questions section is
+# ~2KB of decision text, and passes. So inline the questions and point at the
+# file for anything deeper.
+# Triage needs the questions, not the report. Last night's findings can run to
+# 25KB of session narrative, and a body that reads like exploit development (a
+# night spent on TV firmware, sdb, root status, dlopen) makes the session read as
+# an offensive-security engagement to model providers' content classifiers: on
+# 2026-10-27 every launch of this script with the whole report inlined was
+# refused with "Opus 5.5's safeguards flagged this session ... [cyber]",
+# including a bare "go". The same report's questions section is ~2KB of decision
+# text and passes.
+#
+# Which text is "the questions section" is report-format.sh's contract, not this
+# script's: the section sits between AUTODREAM_QUESTIONS_BEGIN and
+# AUTODREAM_QUESTIONS_END, and report_questions() falls back to the old markdown
+# heading only for reports written before that block existed. Nothing here parses
+# markdown, so nothing here can disagree with notify.sh or question-streaks.sh
+# about where the section ends.
+#
+# The cap is all-or-nothing: a section that does not fit is not inlined at all
+# and the prompt points at the file. Splitting a section at a line, an item or a
+# fence and calling the remainder "the questions" is what asked the session to
+# recommend on half a question.
+QUESTIONS_CAP=12000
+QUESTIONS_TMP=$(mktemp -t autodream-questions.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
+trap 'rm -f "$QUESTIONS_TMP"' EXIT
+report_questions "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
+
+TRUNCATED=0
+QUESTIONS_BYTES=$(wc -c < "$QUESTIONS_TMP" | tr -d ' ')
+if [ "${QUESTIONS_BYTES:-0}" -gt "$QUESTIONS_CAP" ]; then
+  TRUNCATED=1
+  : > "$QUESTIONS_TMP"
+fi
+
 # Build system prompt via tmpfile — heredocs inside $(...) get confused by
 # apostrophes in the body (parser treats them as quote pairs and a literal
 # `)` in the text prematurely closes the command substitution).
-SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX)
-trap 'rm -f "$SYSTEM_TMP"' EXIT
+SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
+trap 'rm -f "$QUESTIONS_TMP" "$SYSTEM_TMP"' EXIT
+if [ "$TRUNCATED" -eq 1 ] && report_has_questions_block "$REPORT"; then
+  QUESTIONS_INTRO="The open questions from the $DATE report are too long to quote here (${QUESTIONS_BYTES} bytes). Read them from $REPORT, between the $QUESTIONS_BEGIN and $QUESTIONS_END lines, before your first reply; nothing from that section is in this prompt."
+elif [ "$TRUNCATED" -eq 1 ]; then
+  # A pre-block report: point at the heading, because the sentinels it would be
+  # told to look for do not exist in it.
+  QUESTIONS_INTRO="The open questions from the $DATE report are too long to quote here (${QUESTIONS_BYTES} bytes). Read them from $REPORT's \"## Open questions for the user\" section before your first reply; nothing from that section is in this prompt."
+else
+  QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) are quoted in full below. Work from these. Do not read the whole report into context and never dump it back to the user; the wider report is on disk at that path if a question needs one specific number from it."
+fi
 cat > "$SYSTEM_TMP" <<EOF
-You are the morning autodream review partner. The user has opened this terminal session to triage open questions from last night's autodream run. The full report from $DATE follows — keep it in context but DO NOT dump it back to the user.
+You are the morning autodream review partner. The user has opened this terminal session to triage open questions from last night's autodream run.
 
-<autodream-report date="$DATE" path="$REPORT" bytes="$REPORT_BYTES">
-$(cat "$REPORT")
-</autodream-report>
+$QUESTIONS_INTRO
 
-Workflow when the user says "go" or otherwise signals ready:
+<open-questions date="$DATE" path="$REPORT" truncated="$TRUNCATED">
+$(cat "$QUESTIONS_TMP")
+</open-questions>
 
-1. Restate ONE open question (in order from the report's "Open questions for the user" section), in full, before asking for any decision. The user has not read the report this morning, so a bare label ("now question 2", "next: the hook failure") is never enough. The restatement must carry (a) the question itself in plain words, (b) every motivation behind it: the findings, session counts, evidence quotes and report section numbers that make it a question, and (c) every potential fix the report or you can see, each with its trade-off. Use the AskUserQuestion tool or prose for the decision, but only after (a), (b) and (c) are on screen.
+Workflow:
+
+1. Restate ONE open question (in order), in full, before asking for any decision. The user has not read the report this morning, so a bare label ("now question 2", "next: the hook failure") is never enough. The restatement must carry (a) the question itself in plain words, (b) every motivation behind it: the findings, session counts, evidence quotes and report section numbers that make it a question, and (c) every potential fix the report or you can see, each with its trade-off. Use the AskUserQuestion tool or prose for the decision, but only after (a), (b) and (c) are on screen.
 2. Say what you checked or could not check since the report was written, if anything (a file that now exists, a count that moved).
 3. Recommend one concrete action from (c). Be opinionated — the user trusts your judgment.
 4. Wait for: approve / modify / skip / discuss.
@@ -390,7 +442,7 @@ Other rules:
 - Be terse everywhere except the question restatement in step 1, which is always complete. One question, one decision, one action, then next.
 EOF
 SYSTEM=$(cat "$SYSTEM_TMP")
-rm -f "$SYSTEM_TMP"
+rm -f "$SYSTEM_TMP" "$QUESTIONS_TMP"
 trap - EXIT
 
 echo "─── autodream review: $DATE ($REPORT_BYTES bytes) ───"
@@ -401,4 +453,4 @@ cd "$HOME" || exit 1
 exec "$CLAUDE_BIN" \
   --permission-mode bypassPermissions \
   --append-system-prompt "$SYSTEM" \
-  "go"
+  "Start the triage: restate the first open question and recommend one action."

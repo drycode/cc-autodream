@@ -112,12 +112,10 @@ fi
 
 [ -f "$REPORT" ] || { echo "notify.sh: no such report: $REPORT" >&2; exit 1; }
 
-QUESTIONS=$(awk '
-  /^## Open questions for the user/ { capture=1; next }
-  capture && /^## / { exit }
-  capture && /^---[[:space:]]*$/ { exit }
-  capture { print }
-' "$REPORT")
+# The section's boundaries are report-format.sh's contract (the questions block
+# sentinels, with the markdown heading only as the legacy fallback), so this
+# script and review.sh cannot disagree about where the section stops.
+QUESTIONS=$(report_questions "$REPORT")
 QUESTIONS=$(printf "%s" "$QUESTIONS" | awk 'NF{p=1} p')
 # How many questions the report is actually ASKING. PROMPT.md requires L2 to close the
 # Open questions section with `<!-- autodream:open-questions=N -->`, where N is the count

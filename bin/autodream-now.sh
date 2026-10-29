@@ -127,22 +127,6 @@ env_xml+="        <key>DREAMS_DIR</key><string>${DREAMS_DIR}</string>
 "
 [ "$FORCE" = 1 ] && env_xml+="        <key>AUTODREAM_FORCE</key><string>1</string>
 "
-# Claude account: the scheduled job's CLAUDE_CONFIG_DIR/ANTHROPIC_CONFIG_DIR, so an
-# on-demand run bills the same account as the nightly one even when launched from a
-# shell scoped to another account; the caller's values only fill in when the
-# scheduled job sets none. Without this the run used the default config dir.
-SCHEDULED_PLIST="$HOME/Library/LaunchAgents/${BASE_LABEL}.plist"
-for var in CLAUDE_CONFIG_DIR ANTHROPIC_CONFIG_DIR; do
-  val=""
-  if [ -r "$SCHEDULED_PLIST" ]; then
-    val="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$var" "$SCHEDULED_PLIST" 2>/dev/null || true)"
-  fi
-  val="${val:-${!var:-}}"
-  if [ -n "$val" ]; then
-    env_xml+="        <key>$var</key><string>${val}</string>
-"
-  fi
-done
 
 ONDEMAND_OUT="$AUTODREAM_DIR/logs/ondemand.out.log"
 ONDEMAND_ERR="$AUTODREAM_DIR/logs/ondemand.err.log"

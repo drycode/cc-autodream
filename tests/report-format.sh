@@ -91,6 +91,47 @@ same report_has_sentinel old_has_sentinel
 report_has_sentinel "$D/indented"; assert_eq "$?" "1" "an indented sentinel is not one"
 report_has_sentinel "$D/crlf"; assert_eq "$?" "1" "a CRLF sentinel is not one"
 
+echo "# the questions block: BEGIN before END, both on lines of their own"
+fx qblock    '# R\nAUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n<!-- autodream:open-questions=1 -->\nAUTODREAM_QUESTIONS_END\n## Triage decisions\n'
+fx qunclosed '# R\nAUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n'
+fx qreversed '# R\nAUTODREAM_QUESTIONS_END\n## Open questions for the user\n1. **Q** — a?\nAUTODREAM_QUESTIONS_BEGIN\n'
+fx qabsent   '# R\n## Open questions for the user\n1. **Q** — a?\n'
+fx qindented '# R\n  AUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n  AUTODREAM_QUESTIONS_END\n'
+report_has_questions_block "$D/qblock";    assert_eq "$?" "0" "a closed block is a block"
+report_has_questions_block "$D/qunclosed"; assert_eq "$?" "1" "a block cut off before its END is not one"
+report_has_questions_block "$D/qreversed"; assert_eq "$?" "1" "END before BEGIN is not a block"
+report_has_questions_block "$D/qabsent";   assert_eq "$?" "1" "no block reads as none"
+report_has_questions_block "$D/qindented"; assert_eq "$?" "1" "an indented sentinel is not one"
+
+echo "# report_questions: the block when there is one, the legacy heading otherwise"
+assert_eq "$(report_questions "$D/qblock")" "$(printf '## Open questions for the user\n1. **Q** — a?\n<!-- autodream:open-questions=1 -->')" "a block is returned without its sentinels"
+assert_eq "$(report_questions "$D/qreversed" | head -1)" "1. **Q** — a?" "an unusable block falls back to the heading read"
+assert_eq "$(report_questions "$D/qabsent" | head -1)" "1. **Q** — a?" "a pre-block report is read the old way"
+assert_eq "$(report_questions "$D/empty")" "" "a report with neither yields nothing"
+# The block wins over anything the body happens to say, which is the whole point.
+fx qboth    '# R\n## Open questions for the user\nLEGACY-BODY\n\nAUTODREAM_QUESTIONS_BEGIN\nBLOCK-BODY\nAUTODREAM_QUESTIONS_END\n'
+assert_eq "$(report_questions "$D/qboth")" "BLOCK-BODY" "the block wins over a heading-shaped body"
+
+echo "# the block reader takes the LAST end sentinel, so a quoted one cannot cut it short"
+fx qquoted '# R\nAUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — which end?\n```\nAUTODREAM_QUESTIONS_END\n```\n   - still question 1.\n2. **R** — and this?\nAUTODREAM_QUESTIONS_END\n'
+assert_eq "$(report_questions "$D/qquoted" | tail -1)" "2. **R** — and this?" "a sentinel quoted in the block does not end it"
+assert_eq "$(report_questions "$D/qquoted" | grep -c 'still question 1')" "1" "text after the quoted sentinel is kept"
+report_has_questions_block "$D/qquoted"; assert_eq "$?" "0" "a quoted sentinel still leaves a closed block"
+
+echo "# the legacy fallback is fence-aware: a heading in a code example does not end the section"
+fx qlegacyfence '# R\n## Open questions for the user\n1. **Q** — fence?\n```bash\n## example heading\n```\n   - AFTER-FENCE context.\n2. **R** — second.\n<!-- autodream:open-questions=2 -->\n'
+assert_eq "$(report_questions "$D/qlegacyfence" | grep -c 'AFTER-FENCE')" "1" "a fenced heading does not end the legacy section"
+assert_eq "$(report_questions "$D/qlegacyfence" | grep -c '^2\.')" "1" "the next legacy question is kept"
+
+echo "# report_finishes: one predicate for the live gate, the sweep and the pins"
+fx fdate     '# R\nAUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n<!-- autodream:open-questions=1 -->\nAUTODREAM_QUESTIONS_END\n'
+fx fmarker   '# R\n<!-- autodream:open-questions=1 -->\nAUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n'
+report_finishes "$D/fdate" 2026-10-27;   assert_eq "$?" "0" "a report with the block finishes its date"
+report_finishes "$D/fmarker" 2026-10-27; assert_eq "$?" "1" "a marker alone does not, after the epoch"
+report_finishes "$D/fmarker" 2020-01-02; assert_eq "$?" "0" "before the epoch a marker is enough"
+report_finishes "$D/fmarker";            assert_eq "$?" "0" "no date given: the file-level check only"
+report_finishes "$D/empty" 2020-01-02;   assert_eq "$?" "1" "an empty file never finishes a date"
+
 echo "# the body: everything before the LAST sentinel"
 same report_body old_body
 assert_eq "$(report_body "$D/twosent" | tail -1)" "<!-- autodream:open-questions=1 -->" "the last sentinel ends the body"
@@ -125,11 +166,16 @@ uses notify.sh report_marker_count
 uses question-streaks.sh report_marker_count
 uses triage-dream.sh report_has_sentinel
 uses triage-dream.sh report_body
-uses run.sh report_has_marker
+uses run.sh report_finishes
 uses run.sh report_has_sentinel
 uses run.sh report_body
 uses run.sh report_after_sentinel
 uses run.sh report_pin_lines
+# run.sh must not re-implement the completeness decision locally: one predicate,
+# so the live gate, the sweep and the pins cannot disagree.
+if grep -qE 'report_has_marker .*REPORT_PATH|report_has_questions_block .*REPORT_PATH' "$REPO/bin/run.sh"; then
+  no "bin/run.sh decides completeness outside report_finishes"
+else ok "bin/run.sh decides completeness only through report_finishes"; fi
 for f in notify.sh question-streaks.sh triage-dream.sh run.sh; do
   # shellcheck disable=SC2016 # the dollar signs are literal: the regex matches the script's own source line
   if grep -qE '^[[:space:]]*\. "\$(_rf|_lib)"' "$REPO/bin/$f" && grep -q 'report-format\.sh' "$REPO/bin/$f"; then ok "bin/$f sources report-format.sh"; else no "bin/$f does not source report-format.sh"; fi

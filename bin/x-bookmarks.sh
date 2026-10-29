@@ -384,7 +384,9 @@ fetch_new() {
     cursor=$(next_cursor)
     [ -n "$cursor" ] || break
     page=$(( page + 1 ))
-    sleep 2   # the reference paces pages; do not look like a scraper
+    # The reference paces pages; do not look like a scraper. Only wait when another page follows:
+    # after the last one the loop ends, and the two seconds bought nothing.
+    if [ "$page" -le "$MAX_PAGES" ]; then sleep 2; fi
   done
   return 0
 }

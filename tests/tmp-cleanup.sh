@@ -25,7 +25,8 @@ interrupt_suite() { # $1=suite -> sets $leftover, $alive
   local s="$1" root pid waited=0
   root=$(mktemp -d "$SUITE_TMP/$s.XXXXXX")
   set -m
-  TMPDIR="$root" bash "$HERE/$s.sh" >/dev/null 2>&1 &
+  # run-all as a child must not inherit a shard: it is the suite under interruption, not a slice of it.
+  env -u RUNALL_SHARD -u RUNALL_LIST TMPDIR="$root" bash "$HERE/$s.sh" >/dev/null 2>&1 &
   pid=$!
   set +m
   # Wait for the suite to make a temp dir of its own, polling on a real interval.
