@@ -3134,7 +3134,7 @@ Other findings dropped by the gate:
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-01-open-questions.md" '^# 1 open question$' "marker wins over the 6 list lines in the section"
+  assert_grep "$root/inbox/2020-02-01-open-questions.md" '^\*\*1 open question\*\*$' "marker wins over the 6 list lines in the section"
 
   # --- marker of 0 must stay silent even though the section has prose and bullets ---
   f=$(mk_report 2020-02-02 <<'EOF'
@@ -3160,7 +3160,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-03-open-questions.md" '^# 2 open questions$' "no marker: 2 items, not 5 list lines"
+  assert_grep "$root/inbox/2020-02-03-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: 2 items, not 5 list lines"
 
   # --- no marker: bold topic titles beat the bullets underneath them ---
   f=$(mk_report 2020-02-04 <<'EOF'
@@ -3174,7 +3174,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-04-open-questions.md" '^# 2 open questions$' "no marker: 2 titles, not 4 bullets"
+  assert_grep "$root/inbox/2020-02-04-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: 2 titles, not 4 bullets"
 
   # --- no marker: plain bullets are the questions ---
   f=$(mk_report 2020-02-05 <<'EOF'
@@ -3183,7 +3183,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-05-open-questions.md" '^# 2 open questions$' "no marker: plain bullets counted"
+  assert_grep "$root/inbox/2020-02-05-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: plain bullets counted"
 
   # --- no marker: bare prose still pops, since a non-empty section has something to say ---
   f=$(mk_report 2020-02-06 <<'EOF'
@@ -3191,7 +3191,7 @@ Should the fanout be raised to 12 given the recent session volume?
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-06-open-questions.md" '^# 1 open question$' "no marker: prose falls back to 1"
+  assert_grep "$root/inbox/2020-02-06-open-questions.md" '^\*\*1 open question\*\*$' "no marker: prose falls back to 1"
 
   # --- no marker: a "None ..." lead-in is zero, not a prose question ---
   # Without this case the prose tier turns every quiet pre-marker night into a false pop.

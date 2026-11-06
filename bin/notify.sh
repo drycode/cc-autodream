@@ -190,14 +190,18 @@ if [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ]; then
 fi
 
 OUT="$INBOX_DIR/$DATE-open-questions.md"
+# The file is .md, and the default opener hands it to a markdown app, so the header is
+# real markdown: one title, plain lines, a rule. A `#`-prefixed comment block reads fine
+# in a plain-text editor but renders as a stack of H1s with stray `#` lines.
 cat > "$OUT" <<EOF
 # Autodream — $DATE
-# $COUNT open question$([ "$COUNT" -eq 1 ] || echo s)
-#
-# Full report: $REPORT
-# Triage interactively: $AUTODREAM_DIR/review.sh $DATE
-#
-# ────────────────────────────────────────────────────────
+
+**$COUNT open question$([ "$COUNT" -eq 1 ] || echo s)**
+
+- Full report: \`$REPORT\`
+- Triage interactively: \`$AUTODREAM_DIR/review.sh $DATE\`
+
+---
 
 $QUESTIONS
 EOF

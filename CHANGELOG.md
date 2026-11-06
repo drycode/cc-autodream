@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-06
+
+### Fixed
+- **The inbox file reads as markdown in a markdown app.** `notify.sh` writes `<date>-open-questions.md` and, by default, hands it to whatever the Mac opens `.md` with. Its header was a `#`-prefixed comment block, written for a plain-text editor, so a markdown app showed every header line as a Heading 1 and the bare `#` lines as stray marks. The header is now one title, a bold count, two list lines (full report, triage command) and a `---` rule. Nothing parses the header, so no reader changes.
+
 ## 2026-11-03
 
 ### Added
