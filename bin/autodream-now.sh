@@ -14,6 +14,9 @@
 #     --watch      tail the run log until the report appears (or it gives up), then exit
 #     --dry-run    print the generated plist + launchctl commands; don't run anything
 #
+# The one-shot job gets the scheduled job's environment (that is where a login setting
+# such as CLAUDE_CONFIG_DIR lives), so a manual run uses the same login as the nightly.
+#
 # Everything is auto-detected — nothing is hardcoded to a particular user or host.
 set -euo pipefail
 
@@ -128,6 +131,29 @@ env_xml+="        <key>DREAMS_DIR</key><string>${DREAMS_DIR}</string>
 [ "$FORCE" = 1 ] && env_xml+="        <key>AUTODREAM_FORCE</key><string>1</string>
 "
 
+# The scheduled job's environment, minus the four keys set above. A login setting lives
+# there: a host whose nightly runs on a non-default Claude profile sets CLAUDE_CONFIG_DIR
+# in the job, and a one-shot plist built from PATH alone ran the CLI on the default
+# profile. With no login there, every L2 attempt wrote "Not logged in · Please run /login"
+# and the date stayed unassembled. The caller's own shell environment is deliberately NOT
+# copied: a terminal inside another Claude profile would run the job under that login.
+# scheduler-label.sh --plist applies the same ownership rule the label uses, so a plist
+# that merely shares the label is never read. No scheduled job, no plutil or no jq means
+# nothing is inherited, which is the old behavior.
+xml_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
+SCHED_PLIST="$("$BIN_DIR/scheduler-label.sh" --plist "$AUTODREAM_DIR" 2>/dev/null || true)"
+INHERITED_KEYS=""
+if [ -n "$SCHED_PLIST" ] && command -v plutil >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  # NUL-separated key/value pairs, so no value can be split or unescaped on the way through.
+  while IFS= read -r -d '' k && IFS= read -r -d '' v; do
+    case "$k" in PATH|AUTODREAM_DIR|DREAMS_DIR|AUTODREAM_FORCE) continue ;; esac
+    env_xml+="        <key>$(xml_escape "$k")</key><string>$(xml_escape "$v")</string>
+"
+    INHERITED_KEYS="${INHERITED_KEYS:+$INHERITED_KEYS }$k"
+  done < <(plutil -extract EnvironmentVariables json -o - "$SCHED_PLIST" 2>/dev/null \
+    | jq -j 'to_entries[] | select(.value | type == "string") | .key, "\u0000", .value, "\u0000"' 2>/dev/null)
+fi
+
 ONDEMAND_OUT="$AUTODREAM_DIR/logs/ondemand.out.log"
 ONDEMAND_ERR="$AUTODREAM_DIR/logs/ondemand.err.log"
 
@@ -173,6 +199,7 @@ if [ "$DRYRUN" = 1 ]; then
   echo "launchctl bootstrap $DOMAIN $PLIST   # RunAtLoad fires the one-shot run"
   echo "# log:    $LOG"
   echo "# report: $REPORT"
+  echo "# env from the scheduled job: ${INHERITED_KEYS:-none}${SCHED_PLIST:+ ($SCHED_PLIST)}"
   exit 0
 fi
 
@@ -194,7 +221,9 @@ if [ -n "$holder_pid" ]; then
   exit 75
 fi
 
-printf '%s\n' "$PLIST_BODY" > "$PLIST"
+# Owner-only: the body now carries the scheduled job's environment, which can hold more
+# than paths. launchd only refuses group- or world-writable agent plists, so 600 loads.
+( umask 077; rm -f "$PLIST"; printf '%s\n' "$PLIST_BODY" > "$PLIST" )
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$PLIST" >/dev/null || { echo "autodream-now: generated plist failed plutil lint" >&2; exit 65; }
 fi
@@ -209,6 +238,7 @@ echo "autodream: launched $LABEL for $TARGET (detached, no time cap)"
 echo "  run log: $LOG"
 echo "  report:  $REPORT"
 echo "  this run's launchd stderr: $ONDEMAND_ERR"
+echo "  env from the scheduled job: ${INHERITED_KEYS:-none}"
 
 if [ "$WATCH" = 0 ]; then
   echo "Tail it with:  tail -f \"$LOG\""

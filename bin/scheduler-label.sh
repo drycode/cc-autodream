@@ -23,11 +23,21 @@
 #           status. A caller that would WRITE the plist -
 #           install.sh - must abort on this status instead of overwriting.
 #
+#        scheduler-label.sh --plist <install-dir>
+#   stdout  the path of the scheduled plist this install owns (same ownership
+#           rule as above: the run.sh it invokes is this install's)
+#   exit 0  found
+#   exit 1  this install has no scheduled job. autodream-now reads the job's
+#           environment from this file, so "none" must never fall back to a
+#           plist that only shares the label.
+#
 # Env: LAUNCH_AGENTS_DIR, PLISTBUDDY (tests point these at a sandbox).
 
 set -euo pipefail
 
-TARGET="${1:?usage: scheduler-label.sh <install-dir>}"
+MODE=label
+if [ "${1:-}" = "--plist" ]; then MODE=plist; shift; fi
+TARGET="${1:?usage: scheduler-label.sh [--plist] <install-dir>}"
 LA_DIR="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 PLISTBUDDY="${PLISTBUDDY:-/usr/libexec/PlistBuddy}"
 
@@ -57,6 +67,7 @@ runner_dir_of() {
 }
 
 label=""
+owner=""
 conflict=""
 # Every plist, not just *autodream*.plist. launchd keys a job by its Label, never
 # by its filename, so a foreign job holding the default label in backup.plist is
@@ -76,12 +87,19 @@ for plist in "$LA_DIR"/*.plist; do
     # Our own prior install. Keep its label so a re-install stays idempotent
     # even when that label is not the default one.
     label="$l"
+    owner="$plist"
     break
   fi
   # The default label held by anything that is not our runner is a conflict,
   # including a job that runs no run.sh at all.
   [ "$l" = "$DEFAULT_LABEL" ] && conflict="$plist"
 done
+
+if [ "$MODE" = plist ]; then
+  [ -n "$owner" ] || exit 1
+  printf '%s\n' "$owner"
+  exit 0
+fi
 
 if [ -n "$label" ]; then
   printf '%s\n' "$label"

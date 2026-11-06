@@ -70,6 +70,65 @@ case "$OUT" in *2020-01-03*) ok "the message names the date that holds the label
 LAST_DATE="$(sed -n 's#.*<string>\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)</string>.*#\1#p' "$SANDBOX"/install/*.plist)"
 assert_eq "2020-01-03" "$LAST_DATE" "the holder's plist was not overwritten"
 
+# ------------------------------------------------- the scheduled job's environment --
+make_sched() { # make_sched <label> <runner-dir> <env-dict-body>
+  cat > "$SANDBOX/LaunchAgents/$1.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$1</string>
+    <key>ProgramArguments</key>
+    <array><string>/bin/bash</string><string>$2/run.sh</string></array>
+    <key>EnvironmentVariables</key>
+    <dict>
+$3
+    </dict>
+</dict>
+</plist>
+PLIST
+}
+dry() { # dry [VAR=value ...] -> OUT, RC: a --dry-run with extra caller env
+  OUT="$(env PATH="$SANDBOX/bin:$PATH" AUTODREAM_DIR="$SANDBOX/install" DREAMS_DIR="$SANDBOX/dreams" \
+    LAUNCH_AGENTS_DIR="$SANDBOX/LaunchAgents" "$@" bash "$SUT" 2020-03-01 --dry-run 2>&1)"
+  RC=$?
+}
+has() { case "$OUT" in *"$1"*) ok "$2" ;; *) nope "$2" "no [$1] in: $OUT" ;; esac; }
+lacks() { case "$OUT" in *"$1"*) nope "$2" "unexpected [$1] in: $OUT" ;; *) ok "$2" ;; esac; }
+
+echo "# the one-shot job gets this install's scheduled environment"
+make_sched com.test.autodream "$SANDBOX/install" \
+'        <key>CLAUDE_CONFIG_DIR</key><string>/x/claude-profile</string>
+        <key>PATH</key><string>/sched/only/path</string>
+        <key>ODD_VALUE</key><string>a&amp;b&lt;c&gt;</string>'
+dry
+assert_eq "0" "$RC" "the dry run succeeds"
+has "<key>CLAUDE_CONFIG_DIR</key><string>/x/claude-profile</string>" "the login setting is copied"
+has "<string>a&amp;b&lt;c&gt;</string>" "copied values stay XML-escaped"
+lacks "/sched/only/path" "PATH stays the one-shot's own"
+has "env from the scheduled job: CLAUDE_CONFIG_DIR ODD_VALUE" "the copied keys are named"
+sed -n '/^<?xml/,/^<\/plist>/p' <<<"$OUT" > "$SANDBOX/dry.plist"
+plutil -lint "$SANDBOX/dry.plist" >/dev/null 2>&1 && ok "the generated plist lints" || nope "the generated plist lints" "$(plutil -lint "$SANDBOX/dry.plist" 2>&1)"
+
+echo "# the plist written for a real launch is owner-only"
+launch 2020-03-02 absent
+WRITTEN="$(ls "$SANDBOX"/install/com.test.autodream.ondemand.*.plist 2>/dev/null | head -n 1)"
+assert_eq "600" "$(stat -f %Lp "$WRITTEN" 2>/dev/null)" "the on-demand plist is mode 600"
+rm -f "$SANDBOX/LaunchAgents/com.test.autodream.plist"
+
+echo "# another install's job is never read, even on the label"
+mkdir -p "$SANDBOX/elsewhere"
+make_sched com.test.autodream "$SANDBOX/elsewhere" \
+'        <key>CLAUDE_CONFIG_DIR</key><string>/other/install/profile</string>'
+dry
+lacks "/other/install/profile" "another install's environment is not copied"
+has "env from the scheduled job: none" "it says nothing was copied"
+rm -f "$SANDBOX/LaunchAgents/com.test.autodream.plist"
+
+echo "# the caller's own shell environment is not copied"
+dry CLAUDE_CONFIG_DIR=/caller/shell/profile
+lacks "/caller/shell/profile" "a caller's CLAUDE_CONFIG_DIR does not reach the job"
+
 echo
 echo "passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ]

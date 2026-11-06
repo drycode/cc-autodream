@@ -390,5 +390,29 @@ else
   nope "the shipped template exists" "$TEMPLATE missing"
 fi
 
+# --- --plist: the path of the job this install owns, for autodream-now's env copy ---
+# autodream-now copies the environment out of this file, so it must be the job that runs
+# THIS install, never one that only holds the label.
+run_plist() { # run_plist <target> -> sets SUT_OUT / SUT_RC
+  SUT_OUT="$(bash "$SUT" --plist "$1" 2>"$SANDBOX/err")"
+  SUT_RC=$?
+}
+
+reset_sandbox
+OWN="$(make_plist "com.$USER_SLUG.custom-autodream" "$OMP")"
+run_plist "$OMP"
+assert_eq "$OWN" "$SUT_OUT" "--plist prints the scheduled plist this install owns"
+assert_eq "0" "$SUT_RC" "--plist exits 0 when it finds one"
+
+reset_sandbox
+make_plist "$DEFAULT" "$CC" >/dev/null
+run_plist "$OMP"
+assert_eq "" "$SUT_OUT" "--plist never returns another install's job, even on the default label"
+assert_eq "1" "$SUT_RC" "--plist exits 1 when only another install is scheduled"
+
+reset_sandbox
+run_plist "$OMP"
+assert_eq "1" "$SUT_RC" "--plist exits 1 when nothing is scheduled"
+
 printf '\npassed: %d   failed: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
