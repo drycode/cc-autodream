@@ -2,6 +2,22 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-03
+
+### Added
+- **Sessions that keep hitting the sandbox-shape guard show up again, counted by the runner.** #175 stopped L1 scoring a deny signed `sandbox-shape:` as `sandbox_friction`, because the guard working is not friction, and that made a session that hit the deny over and over invisible (one rush-ops session hit it 124 times). `session-stats.sh` now counts the `tool_result` blocks with `is_error` true whose text opens with that signature, bare or inside `<tool_use_error>`, into the sidecar's `sandbox_shape_denies`. `rollup.tsv` carries it as a new last column, blank (never 0) when the sidecar is missing or broken or comes from omp, which does not measure it. The self-audit lists each session at or over `AUTODREAM_SANDBOX_SHAPE_MIN` (default 10, written to run-stats as `sandbox_shape_denies_min` so L2 can read it) as `hash · project · N denies`, and never folds them into a `sandbox_friction` pattern.
+
+## 2026-11-01
+
+### Fixed
+- **L2 counts from a roll-up, not from a sample of the findings directory.** Glob and a directory read stop at 200 entries, and a findings directory holds three files per session plus about thirty side files. On 2026-10-31 it held 2683 entries for 885 sessions: the report counted from a 90-file sample and never saw `fanouts.tsv`. After L1, `bin/rollup.sh` writes `rollup.tsv` (one row per session, gated ones included, with a `status` column, the sidecar's counts, the parent from `fanouts.tsv`, the findings as `category:severity` and the skill counts) and `categories.tsv` (sessions, findings and up to five example hashes per category and severity, plus an `all` row per category) and `findings.tsv` (one row per finding with its `what`, for patterns narrower than a category). `PROMPT.md` takes every count from those two files, opens a `<hash>.json` only to quote evidence, names every side file by exact path, and tells L2 never to list the findings directory to count anything. run-stats gains `rollup_rows`, `rollup_ungated`, `rollup_gated`, `rollup_error`, `rollup_unreadable`, `rollup_categories`, `rollup_findings` and `rollup_advisor_tool_findings`, or `rollup: failed`.
+- **The upstream changelog caches fetch anonymously.** A user-wide `url.git@github.com:.insteadOf https://github.com/` rewrote every cache fetch to ssh, and with no key loaded all three sources failed on 2026-10-30 and 10-31. Every git call on a cache under `$AUTODREAM_DIR/cache` now runs with `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0`. That covers the clone, the fetch and the on-demand blob fetches that `git log -p` makes in a partial clone. A repo outside the cache keeps the user's git config. A private source that needs a credential helper must keep its cache outside `$AUTODREAM_DIR/cache`.
+- **A failed changelog fetch says why.** The section quotes git's cause line (`Git pull failed (git@github.com: Permission denied (publickey).); ...`), sanitized to one bounded line, and the full stderr still goes to the run log.
+- **A changelog diff that cannot be read is no longer a quiet night.** `git log -p` in a partial clone fetches old blobs from the remote, and its failure went to `/dev/null`, so the section read "No changelog commits in this window". It is now `Git log failed (<cause>)` and counts as a failed source.
+
+### Added
+- **A warning banner when every changelog source fails in one run** (`notify.sh --warning <date> <reason>`). It names the first failure, is labelled WARNING rather than FAILED, and writes no `<date>-FAILED.txt`. One failing source posts nothing.
+
 ## 2026-10-29
 
 ### Changed

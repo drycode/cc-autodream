@@ -107,6 +107,9 @@
 #                             open-questions marker; earlier unmarked reports are treated
 #                             as complete (legacy) rather than abandoned
 #                                                                     default: 2026-08-19
+#   AUTODREAM_SANDBOX_SHAPE_MIN  a session with at least this many denies signed by the sandbox-shape
+#                        guard is listed in the report's self-audit (rollup.tsv's sandbox_shape_denies,
+#                        threshold passed to L2 as run-stats sandbox_shape_denies_min)   default: 10
 #   AUTODREAM_MIN_USER_TURNS  noise-gate floor on user_message_count  default: 2
 #   AUTODREAM_MIN_MINUTES     noise-gate floor on duration_minutes    default: 1
 #   AUTODREAM_STATS_BIN       override the resolved session-stats.sh path, authoritative
@@ -241,6 +244,15 @@ case "$AUTODREAM_L1_MAX_CHUNKS" in
 esac
 AUTODREAM_L1_MAX_CHUNKS=$((10#$AUTODREAM_L1_MAX_CHUNKS))
 [ "$AUTODREAM_L1_MAX_CHUNKS" -ge 1 ] || { echo "FATAL: AUTODREAM_L1_MAX_CHUNKS must be at least 1" >&2; exit 1; }
+# The report lists sessions with at least this many sandbox-shape denies. 0 would list every
+# session, so the floor is 1. L2 cannot read the environment, so write_rollup hands it the value
+# through run-stats.txt.
+AUTODREAM_SANDBOX_SHAPE_MIN="${AUTODREAM_SANDBOX_SHAPE_MIN:-10}"
+case "$AUTODREAM_SANDBOX_SHAPE_MIN" in
+  ''|*[!0-9]*) echo "FATAL: AUTODREAM_SANDBOX_SHAPE_MIN must be a positive integer (got '$AUTODREAM_SANDBOX_SHAPE_MIN')" >&2; exit 1 ;;
+esac
+AUTODREAM_SANDBOX_SHAPE_MIN=$((10#$AUTODREAM_SANDBOX_SHAPE_MIN))
+[ "$AUTODREAM_SANDBOX_SHAPE_MIN" -ge 1 ] || { echo "FATAL: AUTODREAM_SANDBOX_SHAPE_MIN must be a positive integer (got 0, which would list every session)" >&2; exit 1; }
 # The noise gate hands these to jq --argjson with stderr discarded. A non-number makes jq
 # fail, the gate comes back empty, and every session goes to a model call with no message.
 for _knob in AUTODREAM_MIN_USER_TURNS AUTODREAM_MIN_MINUTES; do
@@ -457,6 +469,8 @@ fi
 # chunk note, so the off path is what it was.
 CHUNKER=$(find_lib chunk-transcript.sh) || CHUNKER=""
 MERGER=$(find_lib merge-chunks.sh) || MERGER=""
+# The per-session roll-up L2 counts from (rollup.tsv, categories.tsv). Artifacts only, no model calls.
+ROLLUP=$(find_lib rollup.sh) || ROLLUP=""
 L1_CHUNKING=0
 if [ "$AUTODREAM_L1_CHUNK_BYTES" -gt 0 ] && [ -n "$CHUNKER" ] && [ -n "$MERGER" ]; then
   L1_CHUNKING=1
@@ -1388,17 +1402,134 @@ changelog_sources() {
 
 # True only when $1's parent directory resolves, symlinks and all, inside $AUTODREAM_DIR/cache.
 # A `..` anywhere is refused before resolving, so the basename cannot climb out either.
+# Parents that do not exist yet are skipped up to the nearest one that does, and that one is
+# resolved: a nested source like cache/nested/source is owned on its first clone (#174). Only a
+# name that does not exist at all is skipped, so a symlink in the path, dangling or not, is
+# still resolved or refused, never walked past. With no `..`, what clone creates below that
+# ancestor stays below it.
 cache_owns() {
   local cache parent
   case "$1" in *..*) return 1 ;; esac
   cache=$(cd "$AUTODREAM_DIR/cache" 2>/dev/null && pwd -P) || return 1
-  parent=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1
+  parent=$(dirname "$1")
+  while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+    [ "$parent" != "$(dirname "$parent")" ] || return 1
+    parent=$(dirname "$parent")
+  done
+  parent=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
   case "$parent/" in "$cache"/*) return 0 ;; esac
   return 1
 }
 
-# Append one source's section to $5. Never returns non-zero — a source that cannot be
-# reached says so in its own section and the run carries on.
+# git for one changelog source. A cache this install owns reads a public remote, so it runs
+# with no user or system git config and never prompts: the host's `url.git@github.com:.insteadOf
+# https://github.com/` rewrote the cache fetches to ssh, and with no key loaded all three sources
+# failed on 2026-10-30 and 10-31 while anonymous https worked. Every call on an owned cache goes
+# through here, not only fetch and clone: the caches are blob:none partial clones, so reset and
+# `git log -p` fetch missing blobs from the same remote on demand. A repo outside the cache is
+# someone's checkout and keeps their config.
+changelog_git() { # $1=owned (yes|no), then git's arguments
+  local owned="$1"; shift
+  if [ "$owned" = yes ]; then
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git "$@"
+    return
+  fi
+  git "$@"
+}
+
+# The stderr line that names why git failed, made safe to quote inside one markdown line.
+# The FIRST line that is not blank, a hint or a warning (any case: OpenSSH prints
+# "Warning: Permanently added ..." ahead of "Permission denied"): git puts the cause first and its
+# boilerplate advice last ("Please make sure you have the correct access rights / and the
+# repository exists."), so the last line says nothing. Backticks and angle brackets would open
+# a code span or an HTML tag in the section L2 reads, so they are swapped out; length is capped.
+changelog_err_line() { # $1=stderr file
+  local line
+  line=$(tr -d '\r' < "$1" 2>/dev/null \
+    | grep -v -i -e '^[[:space:]]*$' -e '^[[:space:]]*hint:' -e '^[[:space:]]*warning:' \
+    | head -n 1 | tr '\t`<>' " '()" | tr -d '\000-\037\177' \
+    | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//')
+  [ "${#line}" -le 200 ] || line="${line:0:197}..."
+  printf '%s' "$line"
+}
+
+# A source that could not be checked: say so in its section, with git's reason when there is
+# one, and remember the run's first failure for changelog_window's warning.
+changelog_fail() { # $1=name $2=what failed $3=git's reason (may be empty) $4=out
+  local name="$1" what="$2" why="$3" out="$4"
+  log "changelog[$name]: $what${why:+ ($why)}"
+  printf '## %s\n\n%s%s; %s changes not checked this run.\n\n' \
+    "$name" "$what" "${why:+ ($why)}" "$name" >> "$out"
+  [ -n "$CHANGELOG_FIRST_ERR" ] || CHANGELOG_FIRST_ERR="$name: ${why:-$what}"
+}
+
+# Run one git step for a source with its stderr captured. All of it still goes to the run log;
+# on failure the section quotes the cause line. Returns the step's status.
+changelog_step() { # $1=name $2=what failed $3=out, then the command
+  local name="$1" what="$2" out="$3" errf rc=0
+  shift 3
+  errf=$(mktemp "${TMPDIR:-/tmp}/clerr.XXXXXX" 2>/dev/null) || errf=/dev/null
+  "$@" 2>"$errf" || rc=1
+  cat "$errf" >> "$RUN_LOG" 2>/dev/null
+  [ "$rc" -eq 0 ] || changelog_fail "$name" "$what" "$(changelog_err_line "$errf")" "$out"
+  [ "$errf" = /dev/null ] || rm -f "$errf"
+  return "$rc"
+}
+
+# A cache this install owns is disposable, so it follows the remote even when the remote was
+# rewritten. `pull --ff-only` failed forever once a fork was rebased and force-pushed (the OMP
+# fork is, on every upstream sync): the section then read "pull failed" every night. A repo
+# outside the cache keeps the conservative pull, because resetting it would discard someone's work.
+changelog_sync() { # $1=repo $2=owned
+  if [ "$2" = yes ]; then
+    ( cd "$1" && changelog_git yes fetch --quiet origin && changelog_git yes reset --hard --quiet FETCH_HEAD )
+    return
+  fi
+  ( cd "$1" && git pull --ff-only --quiet )
+}
+
+# The window's changelog diff for one source, written to $4.
+changelog_patch() { # $1=repo $2=owned $3=path $4=dest file
+  ( cd "$1" && changelog_git "$2" log -p --reverse \
+      --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" -- "$3" ) > "$4"
+}
+
+# Clone a source that has no repo yet. Returns non-zero when there is nothing to read.
+changelog_clone() { # $1=name $2=remote $3=path $4=repo $5=owned $6=out
+  local name="$1" remote="$2" path="$3" repo="$4" owned="$5" out="$6"
+  # Only a cache this install owns may be cleared. AUTODREAM_CHANGELOG_SOURCES names the
+  # path, so a typo pointing at a real non-git directory must not be deleted to make room
+  # for a clone (debate review of e95e2f2).
+  # The path as written proves nothing: `$AUTODREAM_DIR/cache/../x` matches the prefix,
+  # and so does `$AUTODREAM_DIR/cache/link/x` where link points elsewhere, and rm -rf
+  # follows both (Codex review of 0129fc0). cache_owns resolves the parent physically and
+  # compares that. Outside the cache nothing is deleted at all; git clone accepts a missing
+  # or empty target directory.
+  if [ "$owned" = yes ]; then rm -rf "$repo"; fi
+  if [ -e "$repo" ] && [ -n "$(ls -A "$repo" 2>/dev/null)" ]; then
+    log "changelog[$name]: $repo exists, is not a git repo and is outside $AUTODREAM_DIR/cache; refusing to delete it"
+    changelog_fail "$name" "Cache path $repo is a non-empty directory that is not a git clone" "" "$out"
+    return 1
+  fi
+  log "changelog[$name]: cloning $remote -> $repo..."
+  # blob:none + sparse keeps a monorepo clone cheap — oh-my-pi carries Cargo, bazel and
+  # a node_modules tree, and we want one markdown file out of it. Blobs for the path we
+  # actually log are fetched on demand. Real remotes only: git ignores --filter on a
+  # local clone, and the suite's offline fixture must behave the same either way.
+  local cloneargs=()
+  case "$remote" in
+    *://*|*@*:*) cloneargs=(--filter=blob:none --sparse) ;;
+  esac
+  changelog_step "$name" "Git clone failed" "$out" \
+    changelog_git "$owned" clone --quiet "${cloneargs[@]+"${cloneargs[@]}"}" "$remote" "$repo" || return 1
+  [ "${#cloneargs[@]}" -gt 0 ] || return 0
+  # A file, not a directory: cone mode refuses a file path outright (the old call failed and
+  # `|| true` hid it), so ask for non-cone mode and anchor the pattern with a leading slash.
+  ( cd "$repo" && changelog_git "$owned" sparse-checkout set --no-cone "/$path" ) >/dev/null 2>>"$RUN_LOG" || true
+}
+
+# Append one source's section to $5. Returns non-zero when the source could not be checked
+# (its section says why); the caller counts that and carries on.
 #
 # The section goes to a named file rather than stdout, and that is not a style choice:
 # log() writes to stdout, so a stdout-emitting version run inside a `{ … } > "$out"`
@@ -1406,59 +1537,17 @@ cache_owns() {
 # reads as release notes. Caught in a live run against all three remotes.
 changelog_one() { # $1=name $2=remote $3=path $4=repo $5=out
   local name="$1" remote="$2" path="$3" repo="$4" out="$5"
-  local head_sha n added
+  local head_sha n added owned=no
+  if cache_owns "$repo"; then owned=yes; fi
 
   if [ -d "$repo/.git" ]; then
-    # A cache this install owns is disposable, so it follows the remote even when the remote
-    # was rewritten. `pull --ff-only` failed forever once a fork was rebased and force-pushed
-    # (the OMP fork is, on every upstream sync): the section then read "pull failed" every
-    # night. A repo outside the cache keeps the conservative pull, because resetting it would
-    # discard someone's work.
-    local sync='git pull --ff-only --quiet'
-    if cache_owns "$repo"; then sync='git fetch --quiet origin && git reset --hard --quiet FETCH_HEAD'; fi
-    if ! ( cd "$repo" && eval "$sync" ) 2>>"$RUN_LOG"; then
-      log "changelog[$name]: pull failed"
-      printf '## %s\n\nGit pull failed; %s changes not checked this run.\n\n' "$name" "$name" >> "$out"
-      return 0
-    fi
+    changelog_step "$name" "Git pull failed" "$out" changelog_sync "$repo" "$owned" || return 1
   else
-    # Only a cache this install owns may be cleared. AUTODREAM_CHANGELOG_SOURCES names the
-    # path, so a typo pointing at a real non-git directory must not be deleted to make room
-    # for a clone (debate review of e95e2f2).
-    # The path as written proves nothing: `$AUTODREAM_DIR/cache/../x` matches the prefix,
-    # and so does `$AUTODREAM_DIR/cache/link/x` where link points elsewhere, and rm -rf
-    # follows both (Codex review of 0129fc0). Resolve the parent physically and compare
-    # that. Outside the cache nothing is deleted at all; git clone accepts a missing or
-    # empty target directory.
-    if cache_owns "$repo"; then rm -rf "$repo"; fi
-    if [ -e "$repo" ] && [ -n "$(ls -A "$repo" 2>/dev/null)" ]; then
-      log "changelog[$name]: $repo exists, is not a git repo and is outside $AUTODREAM_DIR/cache; refusing to delete it"
-      printf '## %s\n\nCache path %s is a non-empty directory that is not a git clone; %s changes not checked this run.\n\n' "$name" "$repo" "$name" >> "$out"
-      return 0
-    fi
-    log "changelog[$name]: cloning $remote -> $repo..."
-    # blob:none + sparse keeps a monorepo clone cheap — oh-my-pi carries Cargo, bazel and
-    # a node_modules tree, and we want one markdown file out of it. Blobs for the path we
-    # actually log are fetched on demand. Real remotes only: git ignores --filter on a
-    # local clone, and the suite's offline fixture must behave the same either way.
-    local cloneargs=()
-    case "$remote" in
-      *://*|*@*:*) cloneargs=(--filter=blob:none --sparse) ;;
-    esac
-    if ! git clone --quiet "${cloneargs[@]+"${cloneargs[@]}"}" "$remote" "$repo" 2>>"$RUN_LOG"; then
-      log "changelog[$name]: clone failed"
-      printf '## %s\n\nGit clone failed; %s changes not checked this run.\n\n' "$name" "$name" >> "$out"
-      return 0
-    fi
-    if [ "${#cloneargs[@]}" -gt 0 ]; then
-      # A file, not a directory: cone mode refuses a file path outright (the old call failed and
-      # `|| true` hid it), so ask for non-cone mode and anchor the pattern with a leading slash.
-      ( cd "$repo" && git sparse-checkout set --no-cone "/$path" ) >/dev/null 2>>"$RUN_LOG" || true
-    fi
+    changelog_clone "$name" "$remote" "$path" "$repo" "$owned" "$out" || return 1
   fi
 
-  head_sha=$( cd "$repo" && git rev-parse --short HEAD 2>/dev/null ) || head_sha="?"
-  n=$( cd "$repo" && git log --format=%H \
+  head_sha=$( cd "$repo" && changelog_git "$owned" rev-parse --short HEAD 2>/dev/null ) || head_sha="?"
+  n=$( cd "$repo" && changelog_git "$owned" log --format=%H \
          --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
          -- "$path" 2>/dev/null | wc -l | tr -d ' ' )
   # Inserted changelog lines (new version headers + bullets), oldest-first; strip the
@@ -1470,11 +1559,19 @@ changelog_one() { # $1=name $2=remote $3=path $4=repo $5=out
   # release header it sits under: `### Fixed` and `- Fixed a crash` repeat across releases, and
   # a window-wide key dropped them from the second release, leaving its bullets under no
   # heading or the first release's (review of https://github.com/STRML/cc-autodream/pull/83).
-  added=$( cd "$repo" && git log -p --reverse \
-             --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
-             -- "$path" 2>/dev/null \
-           | grep '^+' | grep -v '^+++' | sed 's/^+//' \
+  # The patch is read through a file so git's own status is seen: in a blob:none cache,
+  # `log -p` fetches old blobs from the remote, and a failure there piped straight into the
+  # filters below read as "No changelog commits in this window" (panel review of PR #173).
+  local patchf
+  patchf=$(mktemp "${TMPDIR:-/tmp}/clpatch.XXXXXX" 2>/dev/null) \
+    || { changelog_fail "$name" "No scratch file for the changelog diff" "" "$out"; return 1; }
+  if ! changelog_step "$name" "Git log failed" "$out" changelog_patch "$repo" "$owned" "$path" "$patchf"; then
+    rm -f "$patchf"
+    return 1
+  fi
+  added=$( grep '^+' "$patchf" | grep -v '^+++' | sed 's/^+//' \
            | awk '!NF { print; next } /^## \[/ { hdr = $0 } !seen[hdr SUBSEP $0]++' )
+  rm -f "$patchf"
   # Cap per source. One chatty monorepo must not crowd the other harnesses out of L2's
   # context; the cap is per section, so a quiet source is never truncated for a loud one.
   local cap="${AUTODREAM_CHANGELOG_MAX_LINES:-400}" total
@@ -1520,14 +1617,36 @@ changelog_window() {
   # loop in a `> "$out"` block: log() writes to stdout, so that would file the runner's
   # own progress lines as upstream release notes.
   printf '# Harness changelogs — commits in [%s, %s)\n\n' "$TARGET_DATE" "$NEXT_DATE" > "$out"
-  local name remote path repo
-  # Here-string rather than a pipe: a piped while-read runs in a subshell, which is a trap
-  # the moment this loop needs to set a variable the caller reads.
+  # The default caches live here. cache_owns resolves this directory as the root every owned
+  # path must sit under, so on a fresh install the first clone would count as foreign, and run
+  # with the user's git config, without it.
+  mkdir -p "$AUTODREAM_DIR/cache" 2>/dev/null || true
+  # Local here, and seen by changelog_fail and changelog_warn_all_failed through bash's
+  # dynamic scoping, so it never outlives the run's one changelog pass.
+  local CHANGELOG_FIRST_ERR=""
+  local name remote path repo sources=0 failed=0
+  # Here-string rather than a pipe: a piped while-read runs in a subshell, and this loop
+  # sets counters (and changelog_fail sets CHANGELOG_FIRST_ERR) that are read below.
   while IFS='|' read -r name remote path repo; do
     [ -n "$name" ] || continue
-    changelog_one "$name" "$remote" "$path" "$repo" "$out"
+    sources=$((sources + 1))
+    changelog_one "$name" "$remote" "$path" "$repo" "$out" || failed=$((failed + 1))
   done <<< "$srcs"
   log "changelog: window written -> $out"
+  changelog_warn_all_failed "$sources" "$failed"
+}
+
+# Every source failing in one run is a broken fetch path on this host (lost credentials, a
+# rewritten URL, no network), not a quiet night upstream, and the per-source lines sit in a
+# findings file nobody reads until the report. So it gets a banner. One source failing is
+# already in its own section, and posts nothing.
+changelog_warn_all_failed() { # $1=sources $2=failed
+  [ "$1" -gt 0 ] && [ "$2" -eq "$1" ] || return 0
+  log "changelog: all $1 source(s) failed"
+  [ -x "$AUTODREAM_DIR/notify.sh" ] || return 0
+  "$AUTODREAM_DIR/notify.sh" --warning "$TARGET_DATE" \
+    "upstream changelog check failed for all $1 source(s); first: $CHANGELOG_FIRST_ERR" \
+    || log "changelog warning notification returned non-zero (continuing)"
 }
 
 # ---- Sleep/network resilience helpers ----
@@ -2437,6 +2556,36 @@ compute_fanout_stats() {
   FANOUT_TOP=$((ungated - FANOUT_NESTED))
   FANOUT_PARENTS=$(printf '%s' "$rows" | cut -f2 | sort -u | grep -c .)
   FANOUT_LARGEST=$(printf '%s' "$rows" | cut -f2 | sort | uniq -c | sort -rn | awk 'NR == 1 { print $1 }')
+}
+
+# Writes rollup.tsv, categories.tsv and findings.tsv for L2, which counts from them instead of listing the
+# findings dir: Glob and directory reads stop at 200 entries, and a night of 885 sessions is 2683
+# (2026-10-31, when L2 counted from a 90-file sample and never saw fanouts.tsv). Runs after the
+# skill-field pass, which rewrites the fields it reads, and after compute_fanout_stats, whose
+# fanouts.tsv gives each worker its parent. A failure logs, says so in run-stats.txt and leaves no
+# stale file from an earlier run, so L2 reports the counts as unavailable rather than wrong.
+write_rollup() {
+  local out
+  rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" "$FINDINGS_DIR/findings.tsv" 2>/dev/null
+  if [ -z "$ROLLUP" ]; then
+    log "WARNING: rollup.sh not found; L2 has no rollup.tsv to count from"
+    printf 'rollup: helper missing\n' >> "$FINDINGS_DIR/run-stats.txt"
+    return 0
+  fi
+  # The source map built before any model ran, not sessions-source.txt, which an L1 worker can
+  # rewrite.
+  out=$(AUTODREAM_SOURCE_MAP="${AUTODREAM_SOURCE_MAP:-}" bash "$ROLLUP" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1)
+  case "$out" in
+    "rollup: rows="*) ;;
+    *) log "WARNING: rollup.sh failed; L2 has no rollup.tsv to count from"
+       # One file without the others would be read as a whole roll-up.
+       rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" "$FINDINGS_DIR/findings.tsv" 2>/dev/null
+       printf 'rollup: failed\n' >> "$FINDINGS_DIR/run-stats.txt"
+       return 0 ;;
+  esac
+  log "$out"
+  printf '%s\n' "${out#rollup: }" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=\([0-9]*\)$/rollup_\1: \2/p' >> "$FINDINGS_DIR/run-stats.txt"
+  printf 'sandbox_shape_denies_min: %s\n' "$AUTODREAM_SANDBOX_SHAPE_MIN" >> "$FINDINGS_DIR/run-stats.txt"
 }
 
 dispatch_l1() { # one parallel pass; idempotent worker → only the still-missing sessions run
@@ -4316,6 +4465,8 @@ PY
     TRIAGE_SUMMARY="triage: helper missing"
   fi
   printf 'triage_candidates: %s\n' "$TRIAGE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
+
+  write_rollup
 
   # ---- Skills inventory and per-source facts (written for L2 to read) ----
   write_adapter_inputs

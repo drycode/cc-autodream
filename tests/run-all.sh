@@ -915,8 +915,9 @@ test_session_stats(){
     '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"result"}]}}' > "$fixture"
   "$REPO/bin/session-stats.sh" "$fixture" "$out"
   assert_eq "$(jq -r 'keys | sort | join(",")' "$out")" \
-    "compliance_markers,duration_minutes,isSidechain,models_used,skills_authored,skills_invoked,skills_invoked_count,skills_invoked_counts,tool_call_count,tools_used,transcript_bytes,transcript_mtime,turn_count,user_message_count,user_turn_timestamps" \
+    "duration_minutes,isSidechain,models_used,sandbox_shape_denies,skills_authored,skills_invoked,skills_invoked_count,skills_invoked_counts,tool_call_count,tools_used,transcript_bytes,transcript_mtime,turn_count,user_message_count,user_turn_timestamps" \
     "stats output has exactly the specified fields"
+  assert_eq "$(jq -r .sandbox_shape_denies "$out")" "0" "no sandbox-shape deny is a measured 0, not a blank"
   assert_eq "$(jq -r '.user_turn_timestamps | length' "$out")" "0" "no timestamped user turns in this fixture -> empty user_turn_timestamps"
   assert_eq "$(jq -r .user_message_count "$out")" "1" "tool_result carriers are excluded from user message count"
   assert_eq "$(jq -r .turn_count "$out")" "4" "turn count includes tool_result carriers"
@@ -941,11 +942,9 @@ test_session_stats(){
     '{"type":"assistant","message":{"content":[{"type":"text","text":"DELEGATED: scout — find X\nthe report said DELEGATED: quoted mid-line\n```\nDELEGATED: fenced example\nDIRECT-OK: fenced example\n```\nDIRECT-OK: tiny-edit — one-line fix"}]}}' \
     '{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"DELEGATED: harvester — sidechain worker line"}]}}' > "$fixture"
   "$REPO/bin/session-stats.sh" "$fixture" "$out"
-  assert_eq "$(jq -r '.compliance_markers["RETRY-BUDGET"]' "$out")" "1" "only assistant text counts RETRY-BUDGET"
-  assert_eq "$(jq -r '.compliance_markers["DELEGATED"]' "$out")" "1" "DELEGATED counts line-start only (mid-line, fenced, sidechain excluded)"
-  assert_eq "$(jq -r '.compliance_markers["DIRECT-OK"]' "$out")" "1" "DIRECT-OK counts line-start only (fenced excluded)"
-  assert_eq "$(jq -r '.compliance_markers | keys | sort | join(",")' "$out")" \
-    "DELEGATED,DIRECT-OK,FETCH-PIVOT,RETRY-BUDGET" "compliance_markers carries all four keys"
+  # compliance_markers retired for claude 2026-10-30 (omp: 2026-08-08): agents follow
+  # the retry rules without typing the line, so the count only measured silence.
+  assert_eq "$(jq -r 'has("compliance_markers")' "$out")" "false" "marker lines produce no compliance_markers field"
 
   fixture="$root/text-image.jsonl"; out="$root/text-image.stats.json"
   printf '%s\n' \
@@ -966,6 +965,26 @@ test_session_stats(){
   assert_eq "$(jq -r .tool_call_count "$out")" "3" "sidechain tool calls are counted mechanically"
   assert_eq "$(jq -r '.tools_used | join(",")' "$out")" "Bash,Read,Write" "sidechain tools are sorted and unique"
   assert_eq "$(jq -r .isSidechain "$out")" "true" "sidechain marker is copied"
+
+  # sandbox_shape_denies counts tool_result blocks whose text OPENS with a deny the
+  # sandbox-shape guard signs. The real deny is a tool_use_error with is_error true
+  # (measured 2026-11-03: 52 in one local-llm session, every one anchored). A Read or grep
+  # that merely shows the string mid-text, an attachment and an assistant line are not denies.
+  fixture="$root/shape.jsonl"; out="$root/shape.stats.json"
+  printf '%s\n' \
+    '{"type":"user","message":{"content":"push it"}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","is_error":true,"content":"<tool_use_error>sandbox-shape: this command already runs outside the sandbox. Drop dangerouslyDisableSandbox and send it again unchanged.</tool_use_error>"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"sandbox-shape: the wrapper (cd, git -C, timeout or a redirect) is what puts this call back inside the sandbox"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c","is_error":true,"content":[{"type":"text","text":"<tool_use_error>sandbox-shape: this command already runs outside the sandbox.</tool_use_error>"}]},{"type":"tool_result","tool_use_id":"d","is_error":true,"content":"<tool_use_error>sandbox-shape: second block in one record</tool_use_error>"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"e","is_error":false,"content":"   12\tthe bypass flag is refused as sandbox-shape: see git.md"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"f","is_error":false,"content":"sandbox-shape: printed by a grep, not a deny"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"g","is_error":true,"content":"Operation not permitted: mentions sandbox-shape: mid-text"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"h","is_error":true,"content":"exit 1\nsandbox-shape: on a later line of an error, not its opening"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"i","is_error":true,"content":["a bare string element",{"type":"text","text":"<tool_use_error>sandbox-shape: beside a non-object element</tool_use_error>"}]}]}}' \
+    '{"type":"attachment","attachment":{"type":"instructions","content":"sandbox-shape: in an instructions file"}}' \
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"sandbox-shape: quoted by the agent"}]}}' > "$fixture"
+  "$REPO/bin/session-stats.sh" "$fixture" "$out"
+  assert_eq "$(jq -r .sandbox_shape_denies "$out")" "5" "five signed denies: string content, bare or wrapped, array content (one beside a non-object element), two blocks in one record; a later line is not the opening"
   rm -rf "$root"
 }
 
@@ -2273,6 +2292,204 @@ test_changelog_survives_a_force_pushed_remote(){
   rm -rf "$root"
 }
 
+# A notify.sh stand-in that records each call's arguments, one call per line.
+stub_notify(){ # $1=root
+  printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/notify-args.txt"\nexit 0\n' "$1" > "$1/autodream/notify.sh"
+  chmod +x "$1/autodream/notify.sh"
+}
+
+test_changelog_failure_quotes_git_stderr(){
+  echo "# a failed fetch quotes git's own reason in its section, sanitized, and keeps the full stderr in the run log"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local realgit; realgit=$(command -v git)
+  # A git that fails every clone and fetch the way a real one does: noise first, the cause,
+  # then git's boilerplate advice. The cause carries a backtick, HTML, a CR and a long tail.
+  local long; long=$(printf 'x%.0s' $(seq 1 300))
+  mkdir -p "$root/gitshim"
+  {
+    printf '#!/bin/bash\n'
+    printf 'for a in "$@"; do case "$a" in clone|fetch)\n'
+    printf '  printf "\\n   \\nhint: a hint line\\nwarning: filtering not recognized by server, ignoring\\nWarning: Permanently added github.com (ED25519) to the list of known hosts.\\n" >&2\n'
+    printf '  printf "fatal: unable to access \\140https://x/\\140: <b>boom</b> %s\\r\\n" >&2\n' "$long"
+    printf '  printf "\\nPlease make sure you have the correct access rights\\nand the repository exists.\\n" >&2\n'
+    printf '  exit 128 ;; esac; done\n'
+    printf 'exec "%s" "$@"\n' "$realgit"
+  } > "$root/gitshim/git"
+  chmod +x "$root/gitshim/git"
+  stub_notify "$root"
+
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Shim|https://example.invalid/shim.git|CHANGELOG.md|$root/autodream/cache/shim"
+  PATH="$root/gitshim:$PATH" run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+
+  local cw="$(fdir "$root")/changelog-window.md" line
+  line=$(grep 'Git clone failed' "$cw")
+  case "$line" in
+    "Git clone failed (fatal: unable to access 'https://x/': (b)boom(/b) xxx"*) ok "the section quotes the cause line, not the hint, warning or advice" ;;
+    *) no "the section quotes the cause line (got: $line)" ;;
+  esac
+  case "$line" in
+    *'...); Shim changes not checked this run.') ok "a long line is capped and marked" ;;
+    *) no "a long line is capped and marked (got: $line)" ;;
+  esac
+  [ "${#line}" -le 300 ] && ok "the quoted line is bounded" || no "the quoted line is bounded (${#line} chars)"
+  assert_nogrep "$cw" '`'                       "no backtick reaches the markdown"
+  assert_nogrep "$cw" '<b>'                     "no HTML reaches the markdown"
+  assert_nogrep "$cw" "$(printf '\r')"          "no carriage return reaches the markdown"
+  assert_nogrep "$cw" 'and the repository exists' "git's advice is not quoted"
+  assert_nogrep "$cw" 'Permanently added'         "ssh's capitalised Warning: line is not quoted as the cause"
+  assert_grep "$root/run.out" 'and the repository exists' "the full stderr still goes to the run log"
+  assert_grep "$root/run.out" 'hint: a hint line'         "every stderr line goes to the run log, not only the quoted one"
+  rm -rf "$root"
+}
+
+test_changelog_log_failure_is_not_a_quiet_night(){
+  echo "# a git log -p that fails (a lazy blob fetch in a partial clone) is a failed source, not a quiet night"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 3.3.3\n\n- Never read\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: release' )
+  local realgit; realgit=$(command -v git)
+  # A git that clones fine and fails only the patch read, the way a promisor fetch does.
+  mkdir -p "$root/gitshim"
+  {
+    printf '#!/bin/bash\n'
+    printf 'case " $* " in *" log -p "*)\n'
+    printf '  printf "fatal: could not fetch 1234abcd from promisor remote\\n" >&2; exit 128 ;; esac\n'
+    printf 'exec "%s" "$@"\n' "$realgit"
+  } > "$root/gitshim/git"
+  chmod +x "$root/gitshim/git"
+  stub_notify "$root"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Lazy|$up|CHANGELOG.md|$root/autodream/cache/lazy"
+  PATH="$root/gitshim:$PATH" run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Git log failed (fatal: could not fetch 1234abcd from promisor remote)' "the section says the diff could not be read, and why"
+  assert_nogrep "$cw" 'No changelog commits in this window' "it does not read as a quiet night"
+  assert_grep   "$root/notify-args.txt" '^--warning ' "a failed log counts toward every source failing"
+  rm -rf "$root"
+}
+
+test_changelog_all_sources_failed_notifies(){
+  echo "# every changelog source failing in one run posts one warning naming the first failure"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  stub_notify "$root"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="GhostA|$root/ghost-a.git|CHANGELOG.md|$root/autodream/cache/ga;GhostB|$root/ghost-b.git|CHANGELOG.md|$root/autodream/cache/gb"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+
+  local cw="$(fdir "$root")/changelog-window.md" args="$root/notify-args.txt"
+  assert_grep "$cw" "Git clone failed (fatal: repository '.*ghost-a.git' does not exist)" "the first source's section quotes git"
+  assert_grep "$cw" "Git clone failed (fatal: repository '.*ghost-b.git' does not exist)" "the second source's section quotes git"
+  assert_eq "$(grep -c '^--warning ' "$args" 2>/dev/null)" "1" "exactly one changelog warning is posted"
+  assert_grep "$args" "^--warning $DATE " "the warning names the run date"
+  assert_grep "$args" "all 2 " "the warning says every source failed"
+  assert_grep "$args" "ghost-a.git' does not exist" "the warning quotes the first failure"
+  assert_nogrep "$args" '^--failure' "a changelog failure is not reported as a failed run"
+  rm -rf "$root"
+}
+
+test_changelog_partial_failure_does_not_notify(){
+  echo "# one changelog source failing while another works posts no warning"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local a="$root/up-a"; mkdir -p "$a"
+  ( cd "$a" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 9.9.9\n\n- Alpha in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" \
+      git commit -q -m 'alpha release' )
+  stub_notify "$root"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Alpha|$a|CHANGELOG.md|$root/autodream/cache/a;Ghost|$root/nope.git|CHANGELOG.md|$root/autodream/cache/ghost"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Alpha in-window'  "the working source is read"
+  assert_grep   "$cw" 'Git clone failed' "the dead source reports its failure"
+  assert_nogrep "$root/notify-args.txt" '^--warning' "a partial failure posts no warning"
+  rm -rf "$root"
+}
+
+test_changelog_owned_cache_ignores_global_insteadof(){
+  echo "# an owned cache fetches anonymously: a global url.insteadOf cannot redirect it (2026-10-30/31 ssh failures)"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    # Serve filters, so the clone is a real blob:none partial clone and git log -p has to
+    # fetch old blobs on demand, through the same config the fetch uses.
+    git config uploadpack.allowFilter true
+    printf '# Changelog\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: first' )
+  # The host shape: a user-wide rewrite of every URL of this scheme to somewhere unusable
+  # (on the real host, https://github.com/ to ssh with no key loaded).
+  mkdir -p "$root/home"
+  printf '[url "file:///nonexistent-autodream-bogus"]\n\tinsteadOf = file://\n' > "$root/home/.gitconfig"
+  # The cache dir is deliberately not created: a fresh install's first clone must count as
+  # owned too.
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Owned|file://$up|CHANGELOG.md|$root/autodream/cache/own;Foreign|file://$up|CHANGELOG.md|$root/elsewhere/foreign"
+  HOME="$root/home" run_dream "$root"
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep "$cw" 'First in-window' "the owned cache clones despite the global rewrite"
+  assert_grep "$cw" 'nonexistent-autodream-bogus' "a repo outside the cache still honours the user's git config"
+
+  # Two more commits. Run 2's reset checks out only the newest, so the middle commit's blob
+  # is never materialized by a checkout: git log -p has to fetch it from the remote on demand,
+  # and that fetch goes through the same config (panel review of PR #173: with only the last
+  # commit added, every blob log -p needed was already local and the lazy fetch went untested).
+  ( cd "$up" && printf '# Changelog\n\n## [1.0.1]\n\n- Middle in-window\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T11:00:00" GIT_COMMITTER_DATE="2020-01-02T11:00:00" git commit -q -m 'chore: middle'
+    printf '# Changelog\n\n## [1.0.2]\n\n- Last in-window\n\n## [1.0.1]\n\n- Middle in-window\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: last' )
+  HOME="$root/home" AUTODREAM_FORCE=1 run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  assert_grep   "$cw" 'Last in-window'   "the owned cache fetches despite the global rewrite"
+  assert_grep   "$cw" 'Middle in-window' "and reads a blob no checkout fetched, fetched on demand by log -p"
+  assert_nogrep "$cw" 'Git pull failed'  "no pull failure is reported for the owned cache"
+  assert_nogrep "$cw" 'Git log failed'   "no log failure is reported for the owned cache"
+  rm -rf "$root"
+}
+
+test_changelog_nested_cache_path_is_owned_on_first_clone(){
+  echo "# a cache path nested under a missing directory is owned on its first clone (#174)"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## [1.0.0]\n\n- Nested in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: first' )
+  mkdir -p "$root/home"
+  printf '[url "file:///nonexistent-autodream-bogus"]\n\tinsteadOf = file://\n' > "$root/home/.gitconfig"
+  # A symlink inside the cache that points outside it, with the rest of the path missing:
+  # walking up to the nearest existing directory must still resolve the link and refuse.
+  local ad; ad=$(cd "$root/autodream" 2>/dev/null && pwd) || ad="$root/autodream"
+  mkdir -p "$ad/cache" "$root/outside"
+  ln -s "$root/outside" "$ad/cache/link"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Nested|file://$up|CHANGELOG.md|$ad/cache/nested/deeper/source;Escape|file://$up|CHANGELOG.md|$ad/cache/link/missing/source"
+  HOME="$root/home" run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Nested in-window' "a nested owned cache clones anonymously on its first run"
+  assert_file   "$ad/cache/nested/deeper/source/CHANGELOG.md" "the nested clone landed inside the cache"
+  assert_grep   "$cw" 'nonexistent-autodream-bogus' "a missing path behind a symlink out of the cache keeps the user's git config"
+  rm -rf "$root"
+}
+
 test_autodream_now_from_a_checkout_uses_the_default_install(){
   echo "# autodream-now.sh run from the repo must not adopt bin/ as its install dir"
   local T; T=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
@@ -2994,6 +3211,26 @@ EOF
   rm -rf "$root"
 }
 
+test_notify_warning_is_not_a_failure(){
+  echo "# notify.sh --warning posts a WARNING banner and leaves no FAILED inbox file; --failure still does"
+  local NOTIFY="$REPO/bin/notify.sh"
+  local root; root=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  mkdir -p "$root/cc-autodream.app/Contents/MacOS"
+  printf '#!/bin/sh\nfor a in "$@"; do echo "$a"; done >> "%s/banner.log"\n' "$root" \
+    > "$root/cc-autodream.app/Contents/MacOS/terminal-notifier"
+  chmod +x "$root/cc-autodream.app/Contents/MacOS/terminal-notifier"
+  AUTODREAM_DIR="$root" "$NOTIFY" --warning 2020-03-01 "changelog sources all failed" > "$root/notify.out" 2>&1
+  assert_eq "$?" "0" "a warning exits 0"
+  assert_grep "$root/banner.log" '^WARNING: changelog sources all failed$' "the banner is labelled WARNING"
+  assert_grep "$root/banner.log" '^autodream-warn-2020-03-01$' "in its own notification group"
+  assert_no_file "$root/inbox/2020-03-01-FAILED.txt" "a warning writes no FAILED inbox file"
+  : > "$root/banner.log"
+  AUTODREAM_DIR="$root" "$NOTIFY" --failure 2020-03-01 "the run died" > "$root/notify.out" 2>&1
+  assert_grep "$root/banner.log" '^FAILED: the run died$' "a failure is still labelled FAILED"
+  assert_file "$root/inbox/2020-03-01-FAILED.txt" "and still writes its inbox file"
+  rm -rf "$root"
+}
+
 test_notify_open_command(){
   echo "# notify.sh opens the inbox via AUTODREAM_OPEN (multi-word commands, deprecated SUBL alias)"
   local NOTIFY="$REPO/bin/notify.sh"
@@ -3246,6 +3483,71 @@ test_fanout_stats(){
   rm -rf "$root"
 }
 
+# The roll-up L2 counts from (2026-10-31: L2 could list 200 of 2683 entries and counted a sample).
+# The fanout fixture has 2 ungated top-level sessions, 1 gated one and 5 ungated workers.
+test_rollup_written_for_l2(){
+  echo "# rollup.tsv and categories.tsv: one row per session, written before L2"
+  local root; root=$(setup_env)
+  mk_fanout_fixture "$root"
+  run_dream "$root"
+  local d; d=$(fdir "$root")
+  assert_eq "$(tail -n +2 "$d/rollup.tsv" 2>/dev/null | grep -c .)" "8" "rollup.tsv has a row for every session, gated included"
+  assert_eq "$(tail -n +2 "$d/rollup.tsv" 2>/dev/null | awk -F'\t' '$2 == "gated"' | wc -l | tr -d ' ')" "1" "the gated session is marked gated"
+  assert_eq "$(tail -n +2 "$d/rollup.tsv" 2>/dev/null | awk -F'\t' '$2 != "gated" && $5 == "true" && $7 != ""' | wc -l | tr -d ' ')" "5" "the five workers are nested and name a parent, as fanouts.tsv does"
+  assert_grep "$d/categories.tsv" '^category' "categories.tsv is written with its header"
+  assert_grep "$d/findings.tsv" '^hash' "findings.tsv is written with its header"
+  assert_grep "$d/run-stats.txt" '^rollup_rows: 8$' "run-stats.txt carries the roll-up row count"
+  assert_grep "$d/run-stats.txt" '^rollup_ungated: 7$' "and the ungated count, which matches sessions_top_level + sessions_nested"
+  assert_grep "$d/run-stats.txt" '^rollup_advisor_tool_findings: 0$' "a key with an underscore reaches run-stats too"
+  rm -rf "$root"
+}
+
+test_prompt_counts_from_the_rollup(){
+  echo "# PROMPT.md: counts come from rollup.tsv and categories.tsv, and the findings dir is never listed"
+  local P="$REPO/prompts/PROMPT.md"
+  assert_grep   "$P" 'rollup.tsv' "PROMPT.md names rollup.tsv"
+  assert_grep   "$P" 'categories.tsv' "PROMPT.md names categories.tsv"
+  assert_grep   "$P" 'findings.tsv' "PROMPT.md names findings.tsv"
+  assert_grep   "$P" 'l1_err_files_orphaned' "Triage failures names the orphaned .err count, which has no rollup row"
+  assert_grep   "$P" 'Never Glob, list or read the findings directory to count anything' "PROMPT.md forbids globbing the findings dir to count"
+  assert_nogrep "$P" 'Glob it' "PROMPT.md no longer tells L2 to glob the findings JSONs"
+  assert_nogrep "$P" 'Read them all' "or to read every findings JSON"
+  assert_nogrep "$P" 'use Glob then Read' "and How to start does not glob them either"
+  assert_nogrep "$P" '\*\.json\.err' "a failed triage is found from the status column, not a *.json.err glob"
+  assert_grep   "$P" '`sandbox_shape_denies`' "PROMPT.md names the sandbox_shape_denies column"
+  assert_grep   "$P" 'sandbox_shape_denies_min' "and reads its threshold from run-stats.txt"
+}
+
+# The sandbox-shape guard's denies, counted by the runner (2026-11-03): #175 stopped L1 scoring
+# them as sandbox_friction, which left a session that hit the deny 124 times invisible.
+test_sandbox_shape_denies_reach_the_rollup(){
+  echo "# sandbox_shape_denies: counted from the transcript, carried into rollup.tsv, threshold in run-stats"
+  local root; root=$(setup_env); mk_session "$root" quiet
+  local f="$root/projects/proj-a/shape.jsonl" i
+  printf '%s\n' '{"type":"user","cwd":"/tmp/proj-a","message":{"content":"push the branch"}}' \
+    '{"type":"user","message":{"content":"keep going"}}' > "$f"
+  for i in $(seq 1 12); do
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t%s","name":"Bash","input":{"command":"ls","dangerouslyDisableSandbox":true}}]}}\n' "$i" >> "$f"
+    printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t%s","is_error":true,"content":"<tool_use_error>sandbox-shape: this command already runs outside the sandbox. Drop dangerouslyDisableSandbox and send it again unchanged.</tool_use_error>"}]}}\n' "$i" >> "$f"
+  done
+  touch -t "$STAMP" "$f"
+  run_dream "$root"
+  local d; d=$(fdir "$root")
+  local col; col=$(head -1 "$d/rollup.tsv" 2>/dev/null | tr '\t' '\n' | grep -n '^sandbox_shape_denies$' | cut -d: -f1)
+  assert_eq "${col:-none}" "19" "rollup.tsv has the column, last"
+  assert_eq "$(awk -F'\t' -v k="$(hash_of "$f")" -v c="${col:-19}" '($1 "") == (k "") {print $c}' "$d/rollup.tsv")" "12" "the session's twelve denies"
+  assert_eq "$(awk -F'\t' -v k="$(hash_of "$root/projects/proj-a/quiet.jsonl")" -v c="${col:-19}" '($1 "") == (k "") {print $c}' "$d/rollup.tsv")" "0" "a session with none reads a measured 0"
+  assert_grep "$d/run-stats.txt" '^sandbox_shape_denies_min: 10$' "the default threshold reaches run-stats for L2"
+  AUTODREAM_FORCE=1 AUTODREAM_SANDBOX_SHAPE_MIN=05 run_dream "$root"
+  assert_grep "$d/run-stats.txt" '^sandbox_shape_denies_min: 5$' "an override reaches it too, read as decimal"
+  AUTODREAM_FORCE=1 AUTODREAM_SANDBOX_SHAPE_MIN=ten run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "a non-numeric threshold refuses to start"
+  assert_grep "$root/run.out" 'AUTODREAM_SANDBOX_SHAPE_MIN must be a positive integer' "and says why"
+  AUTODREAM_FORCE=1 AUTODREAM_SANDBOX_SHAPE_MIN=0 run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "0 refuses to start: it would list every session"
+  rm -rf "$root"
+}
+
 test_overlap_none(){
   echo "# overlap (#14): sessions more than 30 minutes apart -> both stats 0, keys still present"
   local root; root=$(setup_env)
@@ -3377,6 +3679,12 @@ _run test_changelog_refuses_foreign_cache_dir
 _run test_changelog_single_remote_suppresses_defaults
 _run test_changelog_dedupe_is_scoped_to_the_release
 _run test_changelog_survives_a_force_pushed_remote
+_run test_changelog_failure_quotes_git_stderr
+_run test_changelog_log_failure_is_not_a_quiet_night
+_run test_changelog_all_sources_failed_notifies
+_run test_changelog_partial_failure_does_not_notify
+_run test_changelog_owned_cache_ignores_global_insteadof
+_run test_changelog_nested_cache_path_is_owned_on_first_clone
 _run test_prune_helper
 _run test_autodream_now_from_a_checkout_uses_the_default_install
 _run test_self_session_excluded
@@ -3422,6 +3730,7 @@ _run test_oversized_gate_script_open
 _run test_oversized_gate_script_empty
 _run test_oversized_gate_script_args
 _run test_notify_count
+_run test_notify_warning_is_not_a_failure
 _run test_notify_open_command
 _run test_notify_dryrun
 _run test_runner_dirty_ignores_untracked
@@ -3431,6 +3740,9 @@ _run test_overlap_none
 _run test_overlap_drops_advisor_sidecars
 _run test_overlap_drops_nested_sidecars
 _run test_fanout_stats
+_run test_rollup_written_for_l2
+_run test_prompt_counts_from_the_rollup
+_run test_sandbox_shape_denies_reach_the_rollup
 _run test_overlap_not_measured_missing_bin
 _run test_overlap_not_measured_empty_output
 _run test_overlap_not_measured_malformed_output
@@ -6298,7 +6610,7 @@ test_chunking_leaves_a_transcript_that_fits_alone(){
   AUTODREAM_L1_CHUNK_BYTES=300000 run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG
   assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "1" "one engine call"
   assert_eq "$(nreads "$root")" "0" "and it was not a chunk"
-  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "its prompt carries no chunk note"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" '^## Chunk note' "its prompt carries no chunk note"
   assert_grep "$fd/run-stats.txt" 'l1_chunked_sessions: 0$' "run-stats counts no chunked session"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and no chunk call"
   assert_nogrep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "it was slimmed with the bookkeeping dropped, so it reads as the conversation"
@@ -6351,7 +6663,7 @@ test_chunking_off_is_the_old_behaviour(){
   if cmp -s "$root/plain.slim" "$root/cap/l1-read-$h.txt"; then ok "what the worker read is exactly what the slimmer writes with no mode set"; else no "what the worker read is exactly what the slimmer writes with no mode set"; fi
   assert_grep "$root/cap/l1-read-$h.txt" 'lines elided by autodream for size' "with the elision marker and the head/tail view"
   assert_grep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "the bookkeeping is still in it (the reshape is part of the chunked mode)"
-  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "no chunk note"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" '^## Chunk note' "no chunk note"
   assert_eq "$(nreads "$root")" "0" "no chunk worker"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_bytes: 0$' "run-stats says chunking is off"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and made no chunk call"
@@ -6811,7 +7123,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt shard"
+_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt shard"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue

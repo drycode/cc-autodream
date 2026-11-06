@@ -277,6 +277,117 @@ ODD="$tmp/odd-calls.jsonl"
 "$A" stats "$ODD" "$tmp/stcalls-odd.json" >/dev/null 2>&1; assert_rc "$?" 0 "string content and a nameless toolCall do not break stats"
 assert_eq "$(jq -r '"\(.tool_call_count) \(.tools_used|length)"' "$tmp/stcalls-odd.json")" "1 0" "the nameless call counts but names nothing"
 
+echo "# stats: a model read of a skill is an invocation (2026-11-03)"
+# The real shapes, copied from ~/.omp/agent/sessions: a main session writes each read as a start
+# record (data.toolCallId, data.args.path) AND as a toolCall block (id, arguments.path); an
+# advisor writes the block alone. Of 739 transcripts modified since 2026-10-27, 2 held a
+# skill-prompt record while 16 read skill://<name> and 18 read a SKILL.md path.
+RS() { # $1=id $2=parent $3=tool $4=path : start record with args
+  printf '{"type":"custom","id":"s%s","parentId":"%s","customType":"tool_execution_start","data":{"toolCallId":"c%s","toolName":"%s","startedAt":"2026-01-02T12:00:05.000Z","args":{"path":"%s"},"intent":"Read skill"}}\n' "$1" "$2" "$1" "$3" "$4"
+}
+RB() { # $1=id $2=parent $3=tool $4=path : assistant toolCall block
+  printf '{"type":"message","id":"b%s","parentId":"%s","message":{"role":"assistant","content":[{"type":"toolCall","id":"c%s","name":"%s","arguments":{"i":"Read skill","path":"%s"}}]}}\n' "$1" "$2" "$1" "$3" "$4"
+}
+RR() { # $1=id $2=isError : the call's toolResult
+  printf '{"type":"message","id":"r%s","parentId":"b%s","message":{"role":"toolResult","toolCallId":"c%s","toolName":"read","isError":%s,"content":[{"type":"text","text":"x"}]}}\n' "$1" "$1" "$1" "$2"
+}
+RD() { RS "$1" "$2" read "$3"; RB "$1" "s$1" read "$3"; RR "$1" "${4:-false}"; }
+SR="$tmp/skill-reads.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 40 /tmp; umsg u1 null a
+  RD 1 u1 'skill://alpha'
+  RD 2 r1 'skill://alpha/references/guide.md'
+  RD 3 r2 'skill://beta:raw'
+  RD 4 r3 '/Users/x/.claude/skills/gamma/SKILL.md:1-60'
+  RD 5 r4 'skill://delta; skill://eps'
+  RD 6 r5 'skill://ghost' true
+  RD 7 r6 'skill://somedir/'
+  RD 8 r7 'skill://alpha/SKILL.md'
+  RD 9 r8 '/Users/x/notes/README.md'
+} > "$SR"
+"$A" stats "$SR" "$tmp/stsr.json" >/dev/null 2>&1
+assert_eq "$(jq -r '.skills_invoked|join(",")' "$tmp/stsr.json")" "alpha,beta,delta,eps,gamma" "skill:// and SKILL.md reads name the skill; references, a dir, a failed read and other files do not"
+assert_eq "$(jq -r .skills_invoked_count "$tmp/stsr.json")" "6" "each entry read counts once, not once per record shape"
+assert_eq "$(jq -r '.skills_invoked_counts.alpha' "$tmp/stsr.json")" "2" "skill://alpha and skill://alpha/SKILL.md are two reads of alpha"
+"$A" normalize "$SR" "$tmp/srn.out" >/dev/null 2>&1; "$A" stats "$tmp/srn.out" "$tmp/stsrn.json" >/dev/null 2>&1
+assert_eq "$(jq -r .skills_invoked_count "$tmp/stsrn.json")" "6" "the count survives the linearized copy the runner reads"
+# An advisor carries blocks only, and a read its toolset rejected is not a read.
+SRA="$tmp/skill-adv/__advisor.jsonl"; mkdir -p "$tmp/skill-adv"
+{ echo "$HDR_TITLE"; hdr_session 41 /tmp; umsg u1 null a
+  RB 1 u1 read 'skill://beta'
+  RB 2 b1 bash 'skill://nope'
+  printf '{"type":"message","id":"r2","parentId":"b2","message":{"role":"toolResult","toolCallId":"c2","toolName":"bash","isError":true,"content":[{"type":"text","text":"Tool \\"bash\\" not available"}]}}\n'
+} > "$SRA"
+"$A" stats "$SRA" "$tmp/stsra.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stsra.json")" "beta 1" "an advisor's block-only skill read counts"
+# Reading a SKILL.md the session also edits is authoring, not use. The hashline edit's start record
+# has no args (279 of 629 recent edit records); its path is only in the block's input header, and
+# it is relative while the read is absolute.
+# The cwd is the repo the relative paths are under: the match is by file, resolved against it (#179).
+SAU="$tmp/skill-author.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 42 /Users/x/repo; umsg u1 null a
+  RD 1 u1 '/Users/x/repo/skills/foo/SKILL.md'
+  printf '{"type":"custom","id":"s2","parentId":"r1","customType":"tool_execution_start","data":{"toolCallId":"c2","toolName":"edit","startedAt":"2026-01-02T12:00:06.000Z","intent":"Tighten foo"}}\n'
+  printf '{"type":"message","id":"b2","parentId":"s2","message":{"role":"assistant","content":[{"type":"toolCall","id":"c2","name":"edit","arguments":{"i":"Tighten foo","input":"[skills/foo/SKILL.md#AB12]\\nPUT 5.=5:\\n+new line\\n"}}]}}\n'
+  RD 3 b2 '/Users/x/repo/skills/bar/SKILL.md'
+  RS 4 r3 write '/Users/x/repo/skills/bar/SKILL.md'; RB 4 s4 write '/Users/x/repo/skills/bar/SKILL.md'
+  RD 5 b4 '/Users/x/repo/skills/baz/SKILL.md'
+  RS 6 r5 edit 'skills/baz/SKILL.md'; RB 6 s6 edit 'skills/baz/SKILL.md'
+  RD 7 b6 'skill://foo'
+} > "$SAU"
+"$A" stats "$SAU" "$tmp/stsau.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stsau.json")" "foo 1" "a SKILL.md read the session also edits or writes is authoring; skill://foo is still use"
+# #179: the match is by FILE, not by skill name. Two skills with one name in different roots do not
+# mask each other. Shapes from real sessions: a hashline edit (start record without args, path only
+# in the block's relative header), an edit and a write with an absolute or `~` path, a read with a
+# line selector. A worktree copy edited while the main checkout's copy is read is the 2026-10-30
+# aim-configs session.
+HL() { # $1=id $2=parent $3=hashline header path : edit start record with no args + its block
+  printf '{"type":"custom","id":"s%s","parentId":"%s","customType":"tool_execution_start","data":{"toolCallId":"c%s","toolName":"edit","startedAt":"2026-01-02T12:00:06.000Z","intent":"Edit skill"}}\n' "$1" "$2" "$1"
+  printf '{"type":"message","id":"b%s","parentId":"s%s","message":{"role":"assistant","content":[{"type":"toolCall","id":"c%s","name":"edit","arguments":{"i":"Edit skill","input":"[%s#AB12]\\nPUT 5.=5:\\n+new line\\n"}}]}}\n' "$1" "$1" "$1" "$3"
+}
+SPF="$tmp/skill-by-file.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 43 /Users/x/repo; umsg u1 null a
+  HL 1 u1 '.claude/skills/foo/SKILL.md'
+  RD 2 b1 '/Users/x/.claude/skills/foo/SKILL.md'
+  RD 3 r2 '/Users/x/repo/.claude/skills/foo/SKILL.md:85-130'
+  RS 4 r3 write '/Users/x/repo/.claude/worktrees/wt/skills/bar/SKILL.md'; RB 4 s4 write '/Users/x/repo/.claude/worktrees/wt/skills/bar/SKILL.md'
+  RD 5 b4 '/Users/x/repo/skills/bar/SKILL.md'
+  RD 6 r5 '/Users/x/repo/.claude/worktrees/wt/skills/bar/SKILL.md'
+} > "$SPF"
+HOME=/Users/x "$A" stats "$SPF" "$tmp/stspf.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspf.json")" "bar,foo 2" "a SKILL.md read is authoring only when the session edits that file, not another skill of the same name"
+"$A" normalize "$SPF" "$tmp/spfn.out" >/dev/null 2>&1; HOME=/Users/x "$A" stats "$tmp/spfn.out" "$tmp/stspfn.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspfn.json")" "bar,foo 2" "the linearized copy resolves against the cwd in autodream_meta"
+# Guards: a `~` path, `.`, `..` and a doubled slash name the same file as the absolute path.
+SPT="$tmp/skill-by-file-tilde.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 44 /Users/x/repo; umsg u1 null a
+  RS 1 u1 edit '~/.omp/agent/managed-skills/upd/SKILL.md'; RB 1 s1 edit '~/.omp/agent/managed-skills/upd/SKILL.md'
+  RD 2 b1 '/Users/x/.omp/agent/managed-skills/upd/SKILL.md'
+  HL 3 r2 './skills/../skills/baz/SKILL.md'
+  RD 4 b3 '/Users/x/repo/skills//baz/SKILL.md'
+  RD 5 r4 '~/skills/qux/SKILL.md'
+} > "$SPT"
+HOME=/Users/x "$A" stats "$SPT" "$tmp/stspt.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspt.json")" "qux 1" "~, . and .. resolve to the file they name before the authoring match"
+# Fallback: a path that cannot be resolved (no cwd in the header, no HOME for `~`, a URL) is matched
+# by skill name, as before #179. Two absolute paths are still compared as files. The URL read of a
+# SKILL.md fetched to install it is the 2026-09-27 forks-omp session's shape.
+SPU="$tmp/skill-by-file-nocwd.jsonl"
+{ echo "$HDR_TITLE"
+  printf '{"type":"session","id":"01a00000-0000-7000-8000-000000000045","timestamp":"2026-01-02T12:00:00.000Z"}\n'
+  umsg u1 null a
+  HL 1 u1 'skills/foo/SKILL.md'
+  RD 2 b1 '/Users/y/skills/foo/SKILL.md'
+  RS 3 r2 write '/Users/x/repo/skills/bar/SKILL.md'; RB 3 s3 write '/Users/x/repo/skills/bar/SKILL.md'
+  RD 4 b3 '/Users/y/skills/bar/SKILL.md'
+  RS 5 r4 edit '/Users/x/skills/zed/SKILL.md'; RB 5 s5 edit '/Users/x/skills/zed/SKILL.md'
+  RD 6 b5 '~/skills/zed/SKILL.md'
+  RS 7 r6 write '/Users/x/.claude/skills/tsai/SKILL.md'; RB 7 s7 write '/Users/x/.claude/skills/tsai/SKILL.md'
+  RD 8 b7 'https://raw.githubusercontent.com/o/skills/main/skills/tsai/SKILL.md'
+} > "$SPU"
+HOME= "$A" stats "$SPU" "$tmp/stspu.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspu.json")" "bar 1" "an unresolvable path falls back to the skill-name match; resolvable ones compare as files"
+
 echo "# is-self: omp's own worker transcripts"
 SELF="$tmp/self.jsonl"
 { echo "$HDR_TITLE"; hdr_session 13 /tmp; umsg u1 null "Session transcript to analyze (literal absolute path): /x"; } > "$SELF"

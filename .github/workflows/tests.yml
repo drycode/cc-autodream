@@ -11,23 +11,35 @@ name: tests
 # same ref cancels the older run, a change that touches no code or test starts nothing, and
 # a draft PR starts nothing until it is marked ready. The launchd suites stay on macOS in
 # launchd.yml and run only when a launchd file changes.
+#
+# Not all markdown is docs. The prompts and the adapters' triage.md and facts.md are code: the
+# suite asserts on what they say, and #175 changed only a prompt, skipped CI under a plain
+# '**.md' ignore, and left two tests red on main (#178). So the filter is `paths` with negations,
+# where the last matching pattern wins: everything, minus docs, plus that markdown back again.
+# `paths-ignore` cannot re-include, and an event cannot have both. Keep the two lists in step.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'example/**'
-      - 'LICENSE'
+    paths:
+      - '**'
+      - '!**.md'
+      - '!docs/**'
+      - '!example/**'
+      - '!LICENSE'
+      - 'prompts/**'
+      - 'adapters/**'
   pull_request:
     # ready_for_review is not a default type: without it, marking a draft ready starts nothing
     # and the job's draft skip would leave the PR with no test run.
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'example/**'
-      - 'LICENSE'
+    paths:
+      - '**'
+      - '!**.md'
+      - '!docs/**'
+      - '!example/**'
+      - '!LICENSE'
+      - 'prompts/**'
+      - 'adapters/**'
 
 concurrency:
   group: tests-${{ github.event.pull_request.number || github.ref }}

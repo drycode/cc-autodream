@@ -29,14 +29,26 @@ set -u
 # launchd PATH) no later run ever succeeds to read it.
 #
 #   notify.sh --failure <date> <reason>
+#
+# A third, --warning, is for a run that carries on and still writes its report but lost a
+# part of its input the operator should hear about now, not in tomorrow's report (every
+# upstream changelog source failing). Same banner path, labelled WARNING, and no
+# <date>-FAILED.txt in the inbox, because the run did not fail.
+#
+#   notify.sh --warning <date> <reason>
 FAILURE_MODE=0
-if [ "${1:-}" = "--failure" ]; then
-  FAILURE_MODE=1
-  DATE="${2:?Usage: notify.sh --failure <date> <reason>}"
-  FAIL_REASON="${3:-the run stopped before it produced a report}"
-  REPORT=""
-else
-  REPORT="${1:?Usage: notify.sh <report.md>  |  notify.sh --failure <date> <reason>}"
+BANNER_LABEL=FAILED
+case "${1:-}" in
+  --failure|--warning)
+    FAILURE_MODE=1
+    [ "$1" = "--warning" ] && BANNER_LABEL=WARNING
+    DATE="${2:?Usage: notify.sh $1 <date> <reason>}"
+    FAIL_REASON="${3:-the run stopped before it produced a report}"
+    REPORT=""
+    ;;
+esac
+if [ "$FAILURE_MODE" = "0" ]; then
+  REPORT="${1:?Usage: notify.sh <report.md>  |  notify.sh --failure|--warning <date> <reason>}"
   DATE=$(basename "$REPORT" .md)
 fi
 _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
@@ -80,20 +92,22 @@ if [ "$FAILURE_MODE" = "1" ]; then
   # Reuses the notifier resolved above and stops before everything below, all of
   # which reads a report that does not exist. Always exits 0: a notification that
   # cannot be posted must not become a second failure on top of the first.
-  msg="Autodream FAILED for $DATE — $FAIL_REASON"
+  msg="Autodream $BANNER_LABEL for $DATE — $FAIL_REASON"
+  label_lc=failure; group=fail
+  [ "$BANNER_LABEL" = "WARNING" ] && { label_lc=warning; group=warn; }
   # Honour the dry-run contract, which this branch returned before reaching. Its
   # documented promise is "writes no inbox file, posts no banner, opens nothing",
   # and anyone exercising the new failure path with it set got a live banner and a
   # stray inbox file.
   if [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ]; then
-    echo "notify.sh: DRY RUN — would post a failure banner for $DATE: $FAIL_REASON"
+    echo "notify.sh: DRY RUN — would post a $label_lc banner for $DATE: $FAIL_REASON"
     exit 0
   fi
   posted=0
   if [ -n "$NOTIFIER" ]; then
-    "$NOTIFIER" -title "Autodream — $DATE" -message "FAILED: $FAIL_REASON" \
-      -group "autodream-fail-$DATE" >/dev/null 2>&1 \
-      && { echo "notify.sh: posted failure banner for $DATE"; posted=1; }
+    "$NOTIFIER" -title "Autodream — $DATE" -message "$BANNER_LABEL: $FAIL_REASON" \
+      -group "autodream-$group-$DATE" >/dev/null 2>&1 \
+      && { echo "notify.sh: posted $label_lc banner for $DATE"; posted=1; }
   fi
   if [ "$posted" = "0" ] && command -v osascript >/dev/null 2>&1; then
     # Escape before interpolating into an AppleScript string literal. A reason
@@ -101,11 +115,12 @@ if [ "$FAILURE_MODE" = "1" ]; then
     # made osascript a syntax error, whose stderr this branch drops, so the one
     # surface a dead run has failed silently on exactly those runs.
     osa_reason=$(printf '%s' "$FAIL_REASON" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    osascript -e "display notification \"FAILED: $osa_reason\" with title \"Autodream — $DATE\"" \
+    osascript -e "display notification \"$BANNER_LABEL: $osa_reason\" with title \"Autodream — $DATE\"" \
       >/dev/null 2>&1 \
-      && { echo "notify.sh: posted osascript failure banner for $DATE"; posted=1; }
+      && { echo "notify.sh: posted osascript $label_lc banner for $DATE"; posted=1; }
   fi
-  [ "$posted" = "1" ] || echo "notify.sh: could not post a failure banner for $DATE (continuing)"
+  [ "$posted" = "1" ] || echo "notify.sh: could not post a $label_lc banner for $DATE (continuing)"
+  [ "$BANNER_LABEL" = "FAILED" ] || exit 0
   printf '%s\n' "$msg" > "$INBOX_DIR/$DATE-FAILED.txt" 2>/dev/null || true
   exit 0
 fi

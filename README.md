@@ -386,6 +386,9 @@ writes the report. It also diffs the changelog of each harness you work across (
 Code, Codex, OMP) over the day, so the report can flag releases that change how you work.
 Each source has its own cache and its own section, so one unreachable remote never
 silences the others. Override the watched set with `AUTODREAM_CHANGELOG_SOURCES`.
+The caches it owns fetch anonymously over https with your git config ignored, so a
+`url.insteadOf` rewrite to ssh cannot break them. A failed fetch quotes git's reason in
+its section, and a night where every source fails posts a warning banner.
 
 Everything lives on disk (findings JSON, the report, run logs, stats) and every step
 is idempotent, so you can rerun any date. Configuration knobs are documented in

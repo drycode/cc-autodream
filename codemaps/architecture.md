@@ -31,9 +31,12 @@ bin/run.sh  TARGET_DATE
       ├─ run-stats.txt          (self-audit telemetry)
       ├─ changelog_window()      → findings/<date>/changelog-window.md  (git log -p on claude-code CHANGELOG)
       │
+      ├─ rollup.sh → findings/<date>/rollup.tsv + categories.tsv + findings.tsv  (what L2 counts from)
+      │
       ├─ L2 retry loop (AUTODREAM_L2_ATTEMPTS):
       │     claude --print (opus, lean flags) with PROMPT.md
-      │       reads all findings/<date>/*.json + changelog-window.md + run-stats.txt
+      │       reads rollup.tsv + categories.tsv + findings.tsv + run-stats.txt + changelog-window.md by exact path;
+      │       opens single <hash>.json files for evidence only (never lists the findings dir)
       │       writes dreams/<date>.md; may write findings/<date>/pins.jsonl (proposed pins)
       │
       ├─ pin-projects.tsv (project → cwd) + bin/apply-pins.sh → shared Mnemopi store
@@ -59,6 +62,7 @@ bin/run.sh  TARGET_DATE
 | `bin/oversized-gate.sh` | recompute the #12 measurement gate over a trailing window from the sidecars/findings on disk (`--days N`, or explicit findings dirs). Recovers dates whose `run-stats.txt` predates the counters; artifacts only, no model calls |
 | `bin/question-streaks.sh` | counts how many consecutive reports asked each open question, keyed by its bold title, and escalates stale ones with a second banner. `update <report> [findings-dir]` / `status` / `clear all\|<key>`. State in `$AUTODREAM_DIR/question-streaks.tsv`. |
 | `bin/root-probe.sh` | detect the `~/.claude*/projects` buckets and decide which to index. `--consolidated`/`--unindexed`/`--list` (read-only, nightly), `--ask`/`--default-index` (install-time; writes root-choices.conf + the managed `SESSION_ROOTS` config section). Artifacts only, no model calls |
+| `bin/rollup.sh` | `rollup.tsv` (one row per session, gated included, `status` column) + `categories.tsv` (per category and severity, plus an `all` row: sessions, findings, example hashes) + `findings.tsv` (one row per finding) for L2 to count from, since its Glob stops at 200 entries. `<findings-dir> [<out-dir>]`; one line of counts on stdout, which `run.sh` turns into `rollup_*` keys in `run-stats.txt`. Artifacts only, no model calls |
 | `bin/citation-check.sh` | resolve every 12-hex session citation in a finished report against the findings dir: emits `citations_total` / `citations_unresolved` / `citations_to_gated` / `citations_resolved_by_path` (+ `_list` keys) on stdout, which `run.sh` appends to `run-stats.txt` after L2. Catches L2 attaching real content to the wrong session hash — including a noise-gated stub it never received content for. Resolves findings hashes and session-UUID tails; matches backticked AND bare hashes; biased to false alarm over false all-clear. Never fatal; exit 2 only when the check could not run. Artifacts only, no model calls |
 | `bin/notify.sh` | extract "Open questions" → inbox file, counted from the `open-questions=N` marker, opened via `$AUTODREAM_OPEN` |
 | `bin/review.sh` | interactive morning triage (launches `claude` with the report's **questions block only** in `--append-system-prompt` — `report_questions` from `report-format.sh`, never the report body — and a real instruction rather than `go`); `AUTODREAM_TRIAGE_SURFACE=cmux` (config/env) launches it in its own cmux workspace instead of inline. Skips the session entirely (prints a notice) when the report has 0 open questions or is already triaged — reads the `<!-- autodream:open-questions=N -->` marker, falls back to prose, launches on anything ambiguous; `--force` overrides. Skip check runs before the cmux branch so a skip never spawns a workspace |

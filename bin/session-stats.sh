@@ -93,16 +93,6 @@ jq -R -s \
       | select(type == "string")
       | try (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch empty
     ] as $timestamps
-  | [
-      $lines[]
-      # Marker counting is top-level-session-only (advisor-cabinet spec):
-      # sidechain (subagent) assistant text never contributes markers.
-      | select(.type == "assistant" and .isSidechain != true and (.message.content | type) == "array")
-      | .message.content[]
-      | select(.type == "text" and (.text | type) == "string")
-      | .text
-    ]
-    | join("\n") as $assistant_text
   # Skill INVOCATION and AUTHORING, counted here and not by the model. A skill runs as a Skill
   # tool call (input.skill) or as a slash command, which Claude Code records as a user line
   # carrying <command-name>/name</command-name>. Authoring is a Write or Edit whose path is a
@@ -118,7 +108,7 @@ jq -R -s \
       $lines[]
       | select(.type == "user" and .isMeta != true)
       | .message.content
-      | if type == "string" then . elif type == "array" then ([.[]? | select(.type == "text") | .text] | join("\n")) else empty end
+      | if type == "string" then . elif type == "array" then ([.[]? | select(type == "object" and .type == "text") | .text | strings] | join("\n")) else empty end
       | (try (capture("<command-name>/?(?<name>[^<\\s]+)</command-name>") | .name) catch empty)
       # Claude Code records its own commands the same way as a skill. Without this list a session
       # that only ran /clear or /model would measure as having invoked a skill. Best effort: a
@@ -132,6 +122,21 @@ jq -R -s \
       | select(type == "string")
       | (try (capture("(^|/)skills/(?<name>[^/]+)/SKILL\\.md$") | .name) catch empty)
     ]) as $skills_authored
+  # Denies the sandbox-shape guard signs: a tool_result whose text OPENS with "sandbox-shape: ",
+  # bare or inside <tool_use_error>, with is_error true. Each one is a turn spent on a
+  # dangerouslyDisableSandbox the guard refused. L1 stopped scoring them as sandbox_friction
+  # (#175), so this count is the only place a session that keeps hitting the guard shows up.
+  # Anchored, because a Read or grep of a file that mentions the guard holds the same words
+  # mid-text (measured 2026-11-03: 52 anchored denies and 1 such echo in one session).
+  | ([
+      $lines[]
+      | select(.type == "user" and (.message.content | type) == "array")
+      | .message.content[]
+      | select(type == "object" and .type == "tool_result" and .is_error == true)
+      | .content
+      | if type == "string" then . elif type == "array" then ([.[]? | select(type == "object" and .type == "text") | .text | strings] | join("\n")) else "" end
+      | select(test("\\A\\s*(<tool_use_error>)?\\s*sandbox-shape: "))
+    ] | length) as $sandbox_shape_denies
   | {
       user_message_count: ($user_messages | length),
       turn_count: ($turns | length),
@@ -153,22 +158,9 @@ jq -R -s \
       skills_invoked_count: ($skills_invoked | length),
       skills_invoked_counts: ($skills_invoked | group_by(.) | map({key: .[0], value: length}) | from_entries),
       skills_authored: ($skills_authored | unique | sort),
-      compliance_markers: (
-        # Line-start counting (2026-07-20, advisor-cabinet spec): a marker counts
-        # only when it BEGINS a line of assistant text and is outside a ``` fence,
-        # so quoted reports and rule-file examples cannot inflate the counts.
-        reduce ($assistant_text | split("\n"))[] as $l (
-          {fence: false, rb: 0, fp: 0, dl: 0, dok: 0};
-          if ($l | test("^\\s*```")) then .fence = (.fence | not)
-          elif .fence then .
-          elif ($l | startswith("RETRY-BUDGET:")) then .rb += 1
-          elif ($l | startswith("FETCH-PIVOT:")) then .fp += 1
-          elif ($l | startswith("DELEGATED:")) then .dl += 1
-          elif ($l | startswith("DIRECT-OK:")) then .dok += 1
-          else . end
-        )
-        | {"RETRY-BUDGET": .rb, "FETCH-PIVOT": .fp, "DELEGATED": .dl, "DIRECT-OK": .dok}
-      ),
+      sandbox_shape_denies: $sandbox_shape_denies,
+      # compliance_markers retired 2026-10-30 (omp: 2026-08-08): agents follow the retry
+      # and delegation rules without typing the marker line, so the count measured silence.
       transcript_bytes: $transcript_bytes,
       transcript_mtime: $transcript_mtime,
       isSidechain: (any($lines[]?; .isSidechain == true)),

@@ -7,6 +7,9 @@ name: launchd
 # bin/portable.sh is in the path list on purpose: its BSD branch is what a Mac runs, and
 # Linux never executes it.
 #
+# skills/autodream/SKILL.md is in it too: tests/install-skill.sh reads its `name:` line through
+# the link install.sh makes, and this list is the only CI that runs that suite (#178).
+#
 # A weekly run does the whole suite on macOS, under the stock bash 3.2 the nightly uses.
 # Bash 3.2 and BSD tools are where this repo's silent failures have come from (an empty
 # array under `set -u`, a BSD-only flag), and a push that touches none of the paths below
@@ -25,6 +28,7 @@ on:
       - 'tests/scheduler-label.sh'
       - 'tests/autodream-now.sh'
       - 'tests/portable.sh'
+      - 'skills/autodream/SKILL.md'
       - '.github/workflows/launchd.yml'
   pull_request:
     # ready_for_review is not a default type: without it, marking a draft ready starts nothing
@@ -41,6 +45,7 @@ on:
       - 'tests/scheduler-label.sh'
       - 'tests/autodream-now.sh'
       - 'tests/portable.sh'
+      - 'skills/autodream/SKILL.md'
       - '.github/workflows/launchd.yml'
   schedule:
     - cron: '17 9 * * 1'
