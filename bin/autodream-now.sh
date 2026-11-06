@@ -11,7 +11,8 @@
 #   autodream-now.sh [YYYY-MM-DD] [--force] [--watch] [--dry-run]
 #     YYYY-MM-DD   date to process (default: yesterday, same as run.sh)
 #     --force      set AUTODREAM_FORCE=1 (rebuild even if a report already exists)
-#     --watch      tail the run log until the report appears (or it gives up), then exit
+#     --watch      tail this run's log until it writes a complete report (exit 0) or ends
+#                  without one (exit 1)
 #     --dry-run    print the generated plist + launchctl commands; don't run anything
 #
 # The one-shot job gets the scheduled job's environment (that is where a login setting
@@ -232,6 +233,11 @@ fi
 # one-shot run exactly once. Do NOT also kickstart, or a fast run (e.g. the
 # idempotency no-op) would execute twice.
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+# Taken before bootstrap, for --watch: a report older than LAUNCH_TS was not written by
+# this run, and a date's log already holds every earlier attempt's lines.
+LAUNCH_TS="$(date +%s)"
+LOG_START=0
+[ -f "$LOG" ] && LOG_START="$(wc -c < "$LOG" | tr -d ' ')"
 launchctl bootstrap "$DOMAIN" "$PLIST"
 
 echo "autodream: launched $LABEL for $TARGET (detached, no time cap)"
@@ -251,23 +257,57 @@ echo "Watching (Ctrl-C to stop watching; the run keeps going) ..."
 for _ in $(seq 1 120); do [ -f "$LOG" ] && break; sleep 1; done
 [ -f "$LOG" ] || { echo "log never appeared at $LOG; check $ONDEMAND_ERR" >&2; exit 1; }
 
-tail -n +1 -f "$LOG" &
+# This run's lines only: the log for a date accumulates every earlier attempt.
+tail -c +"$((LOG_START + 1))" -f "$LOG" &
 TAIL_PID=$!
 trap 'kill "$TAIL_PID" 2>/dev/null || true' EXIT
 
-# Poll for the report. Generous ceiling (90 min) since real runs can be long.
+# Two separate questions, and file size answers neither.
+#   Is the report done? report_finishes(), the predicate run.sh's own L2 retry loop and
+#   the abandoned-date sweep use, and only for a file this run wrote (mtime at or after
+#   launch). The old test, `-s`, fired on the degraded capture run.sh keeps between L2
+#   attempts: a 35-byte "Not logged in · Please run /login" read as "✓ report ready".
+#   Is the run over? launchd has run the job and holds no process for it. Without this,
+#   a run whose every attempt failed was watched for the full 90 minutes.
+# shellcheck source=/dev/null
+. "$BIN_DIR/report-format.sh"
+job_finished() { # 0 once launchd has run the job and no process is left
+  local out
+  out="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)" || return 0   # unloaded: nothing to wait for
+  grep -qE '^[[:space:]]*pid = [0-9]' <<<"$out" && return 1
+  grep -qE '^[[:space:]]*runs = [1-9]' <<<"$out"                      # runs = 0: not started yet
+}
+written_by_this_run() { [ "$(pstat_mtime "$REPORT" || echo 0)" -ge "$LAUNCH_TS" ]; }
+
+POLL="${AUTODREAM_WATCH_POLL:-5}"
+# Generous ceiling (90 min) since real runs can be long.
 deadline=$(( $(date +%s) + 90*60 ))
 while :; do
-  if [ -s "$REPORT" ]; then
+  if report_finishes "$REPORT" "$TARGET" && written_by_this_run; then
     sleep 1
     echo
     echo "✓ report ready: $REPORT"
     exit 0
+  fi
+  if job_finished; then
+    sleep 1
+    echo
+    if report_finishes "$REPORT" "$TARGET"; then
+      if [ "$FORCE" = 1 ]; then
+        echo "✗ the run ended without writing a new report; the previous one is unchanged: $REPORT" >&2
+        exit 1
+      fi
+      echo "✓ report already existed; nothing to rebuild: $REPORT"
+      exit 0
+    fi
+    echo "✗ the run ended without a complete report for $TARGET." >&2
+    echo "  Why is in $LOG (and $ONDEMAND_ERR); an incomplete capture, if any, is at $REPORT.partial-*" >&2
+    exit 1
   fi
   if [ "$(date +%s)" -ge "$deadline" ]; then
     echo
     echo "gave up watching after 90 min; run may still be going — check $LOG" >&2
     exit 1
   fi
-  sleep 5
+  sleep "$POLL"
 done

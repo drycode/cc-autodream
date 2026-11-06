@@ -13,6 +13,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 SUT="$REPO/bin/autodream-now.sh"
+# shellcheck source=/dev/null
+. "$REPO/bin/portable.sh"   # tmo: a --watch bug must fail the suite, not hang it
 
 PASS=0
 FAIL=0
@@ -23,18 +25,35 @@ ok()   { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
 nope() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n     %s\n' "$1" "$2"; }
 assert_eq() { if [ "$1" = "$2" ]; then ok "$3"; else nope "$3" "want [$1] got [$2]"; fi; }
 
-mkdir -p "$SANDBOX/bin" "$SANDBOX/install" "$SANDBOX/dreams" "$SANDBOX/LaunchAgents"
+mkdir -p "$SANDBOX/bin" "$SANDBOX/install" "$SANDBOX/dreams" "$SANDBOX/LaunchAgents" "$SANDBOX/mock"
 CALLS="$SANDBOX/calls"
 # MOCK_STATE: running = loaded with a live pid, idle = loaded with no process, absent = not loaded.
+# The --watch rows also set:
+#   MOCK_ON_BOOTSTRAP  a command run at `bootstrap`: the stand-in for the run itself
+#   MOCK_AFTER=<k>     after bootstrap, `print` shows the job running for k calls, then
+#                      finished (runs = 1, no pid)
 cat > "$SANDBOX/bin/launchctl" <<'MOCK'
 #!/bin/bash
 echo "$*" >> "$MOCK_CALLS"
 case "$1" in
+  bootstrap)
+    : > "$MOCK_DIR/booted"
+    [ -n "${MOCK_ON_BOOTSTRAP:-}" ] && bash -c "$MOCK_ON_BOOTSTRAP"
+    ;;
   print)
-    [ "$MOCK_STATE" = absent ] && exit 113
+    state="$MOCK_STATE"
+    if [ -e "$MOCK_DIR/booted" ] && [ -n "${MOCK_AFTER:-}" ]; then
+      n=$(( $(cat "$MOCK_DIR/prints" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$MOCK_DIR/prints"
+      if [ "$n" -le "$MOCK_AFTER" ]; then state=running; else state=finished; fi
+    fi
+    [ "$state" = absent ] && exit 113
     echo "gui/501/label = {"
-    echo "	state = $MOCK_STATE"
-    [ "$MOCK_STATE" = running ] && printf '\tpid = 4242\n\tpid = 4243\n\tpid = 4244\n\tpid = 4245\n' 
+    case "$state" in
+      finished) printf '\tstate = not running\n\truns = 1\n\tlast exit code = 0\n' ;;
+      *) echo "	state = $state" ;;
+    esac
+    [ "$state" = running ] && printf '\truns = 1\n\tpid = 4242\n\tpid = 4243\n\tpid = 4244\n\tpid = 4245\n'
     echo "}"
     ;;
 esac
@@ -44,7 +63,7 @@ chmod +x "$SANDBOX/bin/launchctl"
 
 launch() { # launch <date> <state> -> runs the SUT, sets OUT and RC
   : > "$CALLS"
-  OUT="$(PATH="$SANDBOX/bin:$PATH" MOCK_CALLS="$CALLS" MOCK_STATE="$2" \
+  OUT="$(PATH="$SANDBOX/bin:$PATH" MOCK_CALLS="$CALLS" MOCK_STATE="$2" MOCK_DIR="$SANDBOX/mock" \
     AUTODREAM_DIR="$SANDBOX/install" DREAMS_DIR="$SANDBOX/dreams" \
     LAUNCH_AGENTS_DIR="$SANDBOX/LaunchAgents" bash "$SUT" "$1" 2>&1)"
   RC=$?
@@ -69,6 +88,59 @@ case "$(verbs)" in *boot*) nope "no bootout or bootstrap happened" "calls: $(ver
 case "$OUT" in *2020-01-03*) ok "the message names the date that holds the label" ;; *) nope "the message names the date that holds the label" "out: $OUT" ;; esac
 LAST_DATE="$(sed -n 's#.*<string>\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)</string>.*#\1#p' "$SANDBOX"/install/*.plist)"
 assert_eq "2020-01-03" "$LAST_DATE" "the holder's plist was not overwritten"
+
+# ---------------------------------------------------------------------- --watch --
+# The mock's bootstrap hook stands in for the run: it writes the log and the report the
+# way run.sh would, and MOCK_AFTER decides how long launchd keeps reporting a process.
+# Dates are before the questions-block epoch, so a report needs only the count marker.
+COMPLETE='# r\n<!-- autodream:open-questions=0 -->\n'
+watch_launch() { # watch_launch <date> <running-polls> <on-bootstrap> [extra args] -> OUT, RC
+  local d="$1" k="$2" hook="$3"; shift 3
+  rm -f "$SANDBOX/mock/booted" "$SANDBOX/mock/prints"; : > "$CALLS"
+  OUT="$(PATH="$SANDBOX/bin:$PATH" MOCK_CALLS="$CALLS" MOCK_STATE=absent MOCK_DIR="$SANDBOX/mock" \
+    MOCK_AFTER="$k" MOCK_ON_BOOTSTRAP="$hook" AUTODREAM_WATCH_POLL=0.1 \
+    AUTODREAM_DIR="$SANDBOX/install" DREAMS_DIR="$SANDBOX/dreams" \
+    LAUNCH_AGENTS_DIR="$SANDBOX/LaunchAgents" tmo 60 bash "$SUT" "$d" --watch "$@" 2>&1)"
+  RC=$?
+}
+logf() { printf '%s' "$SANDBOX/install/logs/run-$1.log"; }
+repf() { printf '%s' "$SANDBOX/dreams/$1.md"; }
+mkdir -p "$SANDBOX/install/logs"
+
+echo "# --watch: a run that only leaves a degraded capture fails, after the job ends"
+D=2020-02-01
+watch_launch "$D" 2 "echo run-line >> '$(logf $D)'; printf 'Not logged in · Please run /login\n' > '$(repf $D)'"
+[ "$RC" -ne 0 ] && ok "a stub report is a failed run" || nope "a stub report is a failed run" "rc=$RC out=$OUT"
+case "$OUT" in *"✓"*) nope "it never says ✓ for a stub" "out: $OUT" ;; *) ok "it never says ✓ for a stub" ;; esac
+case "$OUT" in *"without a complete report"*) ok "it says the run ended without a complete report" ;; *) nope "it says the run ended without a complete report" "out: $OUT" ;; esac
+[ "$(cat "$SANDBOX/mock/prints" 2>/dev/null || echo 0)" -ge 3 ] && ok "it waited for the job to finish" || nope "it waited for the job to finish" "prints: $(cat "$SANDBOX/mock/prints" 2>/dev/null)"
+
+echo "# --watch: a complete report from this run is ready while the job is still going"
+D=2020-02-02
+watch_launch "$D" 1000 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
+assert_eq "0" "$RC" "a complete new report exits 0"
+case "$OUT" in *"✓ report ready"*) ok "it says the report is ready" ;; *) nope "it says the report is ready" "out: $OUT" ;; esac
+
+echo "# --watch: an existing complete report and a no-op run"
+D=2020-02-03
+printf '%b' "$COMPLETE" > "$(repf $D)"; touch -t 202001010000 "$(repf $D)"
+watch_launch "$D" 1 "echo run-line >> '$(logf $D)'"
+assert_eq "0" "$RC" "an existing report with nothing rebuilt exits 0"
+case "$OUT" in *"already existed"*) ok "it says the report already existed" ;; *) nope "it says the report already existed" "out: $OUT" ;; esac
+
+echo "# --watch --force: a rebuild that writes nothing new is a failure"
+D=2020-02-04
+printf '%b' "$COMPLETE" > "$(repf $D)"; touch -t 202001010000 "$(repf $D)"
+watch_launch "$D" 1 "echo run-line >> '$(logf $D)'" --force
+[ "$RC" -ne 0 ] && ok "--force with no new report fails" || nope "--force with no new report fails" "rc=$RC out=$OUT"
+case "$OUT" in *"previous one is unchanged"*) ok "it says the old report is unchanged" ;; *) nope "it says the old report is unchanged" "out: $OUT" ;; esac
+
+echo "# --watch: only this run's log lines are shown"
+D=2020-02-05
+echo "OLD-RUN-LINE" > "$(logf $D)"
+watch_launch "$D" 1000 "echo NEW-RUN-LINE >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
+case "$OUT" in *NEW-RUN-LINE*) ok "this run's lines are shown" ;; *) nope "this run's lines are shown" "out: $OUT" ;; esac
+case "$OUT" in *OLD-RUN-LINE*) nope "an earlier attempt's lines are not replayed" "out: $OUT" ;; *) ok "an earlier attempt's lines are not replayed" ;; esac
 
 # ------------------------------------------------- the scheduled job's environment --
 make_sched() { # make_sched <label> <runner-dir> <env-dict-body>

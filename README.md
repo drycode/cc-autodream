@@ -375,7 +375,7 @@ going after you disconnect:
 ```bash
 ~/.claude/autodream/autodream-now.sh                    # yesterday, right now
 ~/.claude/autodream/autodream-now.sh 2026-05-29 --force # a specific date, rebuild
-~/.claude/autodream/autodream-now.sh 2026-05-29 --watch # follow the log until the report lands
+~/.claude/autodream/autodream-now.sh 2026-05-29 --watch # follow the log; exits 1 if the run ends without a report
 ```
 
 ## How it works (short version)
